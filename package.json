@@ -1,0 +1,42 @@
+{
+  "name": "dronecan-webtools",
+  "version": "1.0.1",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "webpack serve --mode development",
+    "build": "webpack --mode production"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@babel/core": "^7.26.7",
+    "@babel/preset-env": "^7.26.7",
+    "@babel/preset-react": "^7.26.3",
+    "@emotion/react": "^11.14.0",
+    "@emotion/styled": "^11.14.0",
+    "@mui/icons-material": "^6.4.4",
+    "@mui/material": "^6.4.2",
+    "babel-loader": "^9.2.1",
+    "buffer": "^6.0.3",
+    "crypto-browserify": "^3.12.1",
+    "html-webpack-plugin": "^5.6.3",
+    "long": "^5.2.4",
+    "process": "^0.11.10",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "stream-browserify": "^3.0.0",
+    "underscore": "^1.13.7",
+    "util": "^0.12.5",
+    "vm-browserify": "^1.1.2",
+    "webpack": "^5.97.1",
+    "webpack-cli": "^6.0.1",
+    "webpack-dev-server": "^5.2.0"
+  },
+  "devDependencies": {
+    "css-loader": "^7.1.2",
+    "file-loader": "^6.2.0",
+    "style-loader": "^4.0.0"
+  }
+}

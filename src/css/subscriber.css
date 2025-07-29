@@ -1,0 +1,19 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+#sub-root {
+    height: 100vh;
+    width: 100vw;
+    overflow: hidden;
+}
+
+.subscriber-textarea {
+    width: 100vw;
+    height: 100vh;
+    padding: 5px;
+    line-height: 1.5;
+    font-size: 12px;
+}

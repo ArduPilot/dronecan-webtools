@@ -1,0 +1,32 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    background-color: rgb(22, 13, 13);
+    overflow: hidden;
+}
+
+#root {
+    height: 100vh;
+    width: 100vw;
+}
+
+.menu-icon {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    margin-right: 1.5px;
+}
+
+.compact-sidebar {
+  transition: width 0.3s ease;
+}
+
+@media (max-width: 1200px) {
+  .compact-sidebar {
+    width: 60px;
+  }
+}
