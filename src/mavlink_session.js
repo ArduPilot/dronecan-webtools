@@ -1,8 +1,8 @@
 import { EventEmitter } from 'events';
 import WebSocketClient from './ws_client';
 import WebSerial from './web_serial';
-import { mavlink20, MAVLink20Processor } from './mavlink';
 import dronecan from './dronecan';
+import './mavlink';
 
 class MavlinkSession extends EventEmitter {
     constructor() {
@@ -27,8 +27,17 @@ class MavlinkSession extends EventEmitter {
         }
     }
 
-    initWebSocketConnection(ip, port) {
-        this.wsClient = new WebSocketClient(`ws://${ip}:${port}`);
+    initWebSocketConnection(ip, port, mavlinkSigning='') {
+        if (mavlinkSigning) {
+            const enc = new TextEncoder();
+            const data = enc.encode(mavlinkSigning);
+            const hash = mavlink20.sha256(data);
+            this.mavlinkProcessor.signing.secret_key = new Uint8Array(hash);
+            this.mavlinkProcessor.signing.sign_outgoing = true;
+            this.wsClient = new WebSocketClient(`wss://${ip}:${port}`);
+        } else {
+            this.wsClient = new WebSocketClient(`ws://${ip}:${port}`);
+        }
         this.mavlinkProcessor.file = this.wsClient;
 
         this.wsClient.addMessageHandler((buffer) => {
