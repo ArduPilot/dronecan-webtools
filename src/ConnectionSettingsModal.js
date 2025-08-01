@@ -1,13 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import { 
-    Dialog, DialogTitle, DialogContent, DialogActions, 
+    Dialog, DialogTitle, DialogContent, 
     Button, FormControl, InputLabel, Select, MenuItem,
-    Typography, Box, Divider, RadioGroup, FormControlLabel, Radio, Chip,
-    TextField, Tabs, Tab, Paper, IconButton
+    Typography, Box, Divider, Chip,
+    TextField, Paper, IconButton
 } from '@mui/material';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import UsbIcon from '@mui/icons-material/Usb';
 import CloseIcon from '@mui/icons-material/Close';
+import Visibility from '@mui/icons-material/Visibility';
+import VisibilityOff from '@mui/icons-material/VisibilityOff';
 import WebSerial from './web_serial';
 
 // Add this constant at the top of your file, outside the component
@@ -74,6 +76,11 @@ const ConnectionSettingsModal = ({
     selectedBus,  // New prop
     onBusChange   // New prop
 }) => {
+    // State for showing/hiding mavlink signing
+    const [showMavlinkSigning, setShowMavlinkSigning] = useState(false);
+    const handleToggleMavlinkSigning = () => {
+        setShowMavlinkSigning((show) => !show);
+    };
     // Port and connection management
     const [ports, setPorts] = useState([]);
     const [selectedPort, setSelectedPort] = useState(null);
@@ -88,11 +95,13 @@ const ConnectionSettingsModal = ({
     const [activeConnection, setActiveConnection] = useState(null); // null, 'serial', or 'websocket'
 
     // Add these state variables after your other state declarations
-    const [ipError, setIpError] = useState('');
+    const [hostError, setHostError] = useState('');
     const [portError, setPortError] = useState('');
 
     // Add nodeId state to use the prop value
     const [nodeId, setNodeId] = useState(127);
+    // Add mavlink signing state
+    const [mavlinkSigning, setMavlinkSigning] = useState('');
 
     // Add state for the forwarding interval
     const [forwardingInterval, setForwardingInterval] = useState(null);
@@ -315,34 +324,27 @@ const ConnectionSettingsModal = ({
             return '';
         }
         
-        // Check for IPv4 format
-        if (input.includes('.')) {
+        // If input matches IPv4 pattern, validate as IPv4, else treat as hostname/domain
+        const ipv4Pattern = /^\d{1,3}(\.\d{1,3}){3}$/;
+        if (ipv4Pattern.test(input)) {
             const octets = input.split('.');
-            
-            // An IPv4 address must have exactly 4 octets
-            if (octets.length !== 4) {
-                return 'Invalid IPv4 format';
-            }
-            
-            // Each octet must be a number between 0 and 255
             for (const octet of octets) {
                 const num = parseInt(octet, 10);
                 if (isNaN(num) || num < 0 || num > 255 || octet !== num.toString()) {
                     return 'Each part must be a number between 0-255';
                 }
             }
-            
-            // Valid IPv4
             return '';
         }
         
-        // Check for hostname format
-        const hostnamePattern = /^([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\-]*[a-zA-Z0-9])(\.[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\-]*[a-zA-Z0-9])*$/;
-        
+        // Check for hostname or domain (including subdomains)
+        // Allow domains like 'support.ardupilot.org', 'foo.local', etc.
+        const hostnamePattern = /^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?$/;
+
         if (hostnamePattern.test(input)) {
             return '';
         }
-        
+
         return 'Invalid IP address or hostname';
     };
 
@@ -377,11 +379,16 @@ const ConnectionSettingsModal = ({
         }
     };
 
+    // Handler for Mavlink Signing input
+    const handleMavlinkSigningChange = (e) => {
+        setMavlinkSigning(e.target.value);
+    };
+
     // Update the ws host/port change handlers
     const handleWsHostChange = (e) => {
         const value = e.target.value;
         setWsHost(value);
-        setIpError(validateIpAddress(value));
+        setHostError(validateIpAddress(value));
     };
 
     const handleWsPortChange = (e) => {
@@ -396,54 +403,48 @@ const ConnectionSettingsModal = ({
             if (activeConnection === 'websocket') {
                 // Force close the connection
                 window.mavlinkSession.close();
-                
-                // Always update the UI state regardless of actual connection state
                 setActiveConnection(null);
                 onConnectionStatusChange(false);
                 showMessage('WebSocket connection closed', 'info');
-                
-                // Clear the forwarding interval
                 if (forwardingInterval) {
                     clearInterval(forwardingInterval);
                     setForwardingInterval(null);
                 }
             } else {
-                // Set in-progress state before attempting to connect
                 setConnectionInProgress(true);
-                
-                // Validate both fields before connecting
-                const hostError = validateIpAddress(wsHost);
-                const portError = validatePort(wsPort);
-                
-                setIpError(hostError);
-                setPortError(portError);
-                
-                // Only connect if both validations pass
-                if (!hostError && !portError) {
+                const hostErr = validateIpAddress(wsHost);
+                const portErr = validatePort(wsPort);
+                setHostError(hostErr);
+                setPortError(portErr);
+                if (!hostErr && !portErr) {
                     if (activeConnection) {
                         window.mavlinkSession.close();
-                        // Clear any existing interval
                         if (forwardingInterval) {
                             clearInterval(forwardingInterval);
                         }
                     }
 
-                    // Use window.mavlinkSession consistently
-                    window.mavlinkSession.initWebSocketConnection(wsHost, parseInt(wsPort, 10));
+                    // Use wss if signing is present, else ws
+                    const wsProtocol = mavlinkSigning ? 'wss' : 'ws';
+                    // Compose the full URL for the websocket
+                    const wsUrl = `${wsProtocol}://${wsHost}:${wsPort}`;
+                    if (window.mavlinkSession.initWebSocketConnection.length === 1) {
+                        // If the function expects a URL
+                        window.mavlinkSession.initWebSocketConnection(wsUrl);
+                    } else {
+                        // Fallback to old signature (host, port)
+                        window.mavlinkSession.initWebSocketConnection(wsHost, parseInt(wsPort, 10), mavlinkSigning);
+                    }
 
                     window.mavlinkSession.addWebSocketOpenHandler(() => {
                         console.log('WebSocket connection open');
-                        // Set Node ID and Bus for the local node
                         window.localNode.setNodeId(parseInt(nodeId, 10));
                         window.localNode.setBus(selectedBus);
-                        
-                        // Start the mavlinkCanForward interval
                         const intervalId = setInterval(() => {
                             if (window.mavlinkSession) {
                                 window.mavlinkSession.enableMavlinkCanForward(window.localNode.bus);
                             }
                         }, 1000);
-                        
                         setForwardingInterval(intervalId);
                         setActiveConnection('websocket');
                         onConnectionStatusChange(true);
@@ -453,20 +454,13 @@ const ConnectionSettingsModal = ({
 
                     window.mavlinkSession.addWebSocketErrorHandler((error) => {
                         console.error('WebSocket error:', error);
-                        
-                        // Clear any existing interval
                         if (forwardingInterval) {
                             clearInterval(forwardingInterval);
                             setForwardingInterval(null);
                         }
-                        
                         setActiveConnection(null);
                         onConnectionStatusChange(false);
-                        
-                        // Reset in-progress state on error
                         setConnectionInProgress(false);
-                        
-                        // Show error message using App's showMessage function
                         let errorMsg = 'Connection failed';
                         if (error && error.message) {
                             errorMsg = `Connection failed: ${error.message}`;
@@ -478,14 +472,12 @@ const ConnectionSettingsModal = ({
 
                     window.mavlinkSession.webSocketConnect();
                 } else {
-                    // If validation fails, reset the in-progress state
                     setConnectionInProgress(false);
                 }
             }
         } catch (error) {
             console.error('Error with WebSocket connection:', error);
             showMessage(`WebSocket error: ${error.message || 'Unknown error'}`, 'error');
-            // Reset in-progress state on any error
             setConnectionInProgress(false);
         }
     };
@@ -650,8 +642,8 @@ const ConnectionSettingsModal = ({
                                         disabled={activeConnection !== null}
                                         size="small"
                                         sx={{ flex: 3 }}
-                                        error={!!ipError}
-                                        helperText={ipError}
+                                        error={!!hostError}
+                                        helperText={hostError}
                                     />
                                     <TextField
                                         label="Port"
@@ -667,23 +659,23 @@ const ConnectionSettingsModal = ({
                                 </Box>
                                 
                                 <Box sx={{ display: 'flex', justifyContent: 'flex-end' }}>
-                                    <Button 
-                                        onClick={handleWebSocketConnect}
-                                        color={activeConnection === 'websocket' ? "error" : "primary"}
-                                        variant="contained"
-                                        disabled={
-                                            connectionInProgress || // Disable when connection attempt is in progress
-                                            !!ipError || 
-                                            !!portError || 
-                                            !wsHost || 
-                                            !wsPort || 
-                                            (activeConnection !== null && activeConnection !== 'websocket')
-                                        }
-                                        size="small"
-                                    >
-                                        {activeConnection === 'websocket' ? 'Disconnect' : 
-                                         connectionInProgress && !activeConnection ? 'Connecting...' : 'Connect'}
-                                    </Button>
+                                <Button 
+                                    onClick={handleWebSocketConnect}
+                                    color={activeConnection === 'websocket' ? "error" : "primary"}
+                                    variant="contained"
+                                    disabled={
+                                        connectionInProgress || // Disable when connection attempt is in progress
+                                        !!hostError || 
+                                        !!portError || 
+                                        !wsHost || 
+                                        !wsPort || 
+                                        (activeConnection !== null && activeConnection !== 'websocket')
+                                    }
+                                    size="small"
+                                >
+                                    {activeConnection === 'websocket' ? 'Disconnect' : 
+                                     connectionInProgress && !activeConnection ? 'Connecting...' : 'Connect'}
+                                </Button>
                                 </Box>
                             </Box>
                         </Paper>
@@ -691,7 +683,7 @@ const ConnectionSettingsModal = ({
                     
                     <Divider />
                     
-                    {/* Bus Selection */}
+                    {/* Bus Selection and Mavlink Signing */}
                     <Box>
                         <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                             <TextField
@@ -707,6 +699,29 @@ const ConnectionSettingsModal = ({
                                 sx={{ width: 100 }}
                                 error={validateNodeId(nodeId) !== ''}
                                 helperText={validateNodeId(nodeId)}
+                            />
+                            <TextField
+                                label="Mavlink Signing"
+                                value={mavlinkSigning}
+                                onChange={handleMavlinkSigningChange}
+                                disabled={activeConnection !== null}
+                                size="small"
+                                placeholder="Secret Key"
+                                type={showMavlinkSigning ? 'text' : 'password'}
+                                sx={{ flex: 1 }}
+                                InputProps={{
+                                    endAdornment: (
+                                        <IconButton
+                                            aria-label={showMavlinkSigning ? 'Hide secret' : 'Show secret'}
+                                            onClick={handleToggleMavlinkSigning}
+                                            edge="end"
+                                            size="small"
+                                            tabIndex={-1}
+                                        >
+                                            {showMavlinkSigning ? <VisibilityOff fontSize="small" /> : <Visibility fontSize="small" />}
+                                        </IconButton>
+                                    ),
+                                }}
                             />
                         </Box>
                     </Box>
