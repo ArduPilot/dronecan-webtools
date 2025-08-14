@@ -12,6 +12,7 @@ class WebSocketClient {
     connect() {
         // Reset connected status before attempting a new connection
         this.connected = false;
+        console.log(`Connecting to WebSocket at ${this.url}`);
         this.socket = new WebSocket(this.url);
 
         this.socket.addEventListener('open', (event) => {
