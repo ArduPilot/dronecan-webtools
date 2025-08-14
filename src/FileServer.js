@@ -58,14 +58,119 @@ class FileServer {
      * @param {string} path - The virtual path to register the file under
      * @return {Promise} - Resolves when file is loaded
      */
+    /**
+     * Parse Intel HEX format and convert to binary ArrayBuffer
+     * @param {string} hexContent - The Intel HEX file content as string
+     * @returns {ArrayBuffer} - Binary data
+     */
+    parseIntelHex(hexContent) {
+        const lines = hexContent.split(/\r?\n/);
+        let binaryData = [];
+        let minAddress = Infinity;
+        let maxAddress = 0;
+        let addressMap = {};
+        let baseAddress = 0; // For extended address records
+        
+        for (let line of lines) {
+            line = line.trim();
+            if (!line || !line.startsWith(':')) continue;
+            
+            // Parse Intel HEX record
+            const byteCount = parseInt(line.substring(1, 3), 16);
+            const address = parseInt(line.substring(3, 7), 16);
+            const recordType = parseInt(line.substring(7, 9), 16);
+            const data = line.substring(9, 9 + (byteCount * 2));
+            const checksum = parseInt(line.substring(9 + (byteCount * 2), 9 + (byteCount * 2) + 2), 16);
+            
+            // Verify checksum
+            let sum = byteCount + ((address >> 8) & 0xFF) + (address & 0xFF) + recordType;
+            for (let i = 0; i < data.length; i += 2) {
+                sum += parseInt(data.substring(i, i + 2), 16);
+            }
+            sum = (~sum + 1) & 0xFF;
+            if (sum !== checksum) {
+                throw new Error(`Checksum mismatch in line: ${line}`);
+            }
+            
+            if (recordType === 0x00) { // Data record
+                const bytes = [];
+                for (let i = 0; i < data.length; i += 2) {
+                    bytes.push(parseInt(data.substring(i, i + 2), 16));
+                }
+                
+                // Store data at address (with base address offset)
+                for (let i = 0; i < bytes.length; i++) {
+                    const addr = baseAddress + address + i;
+                    addressMap[addr] = bytes[i];
+                    minAddress = Math.min(minAddress, addr);
+                    maxAddress = Math.max(maxAddress, addr);
+                }
+            } else if (recordType === 0x04) { // Extended Linear Address
+                // Upper 16 bits of address
+                const upperAddress = parseInt(data, 16);
+                baseAddress = upperAddress << 16;
+                console.log(`Extended Linear Address: base = 0x${baseAddress.toString(16)}`);
+            } else if (recordType === 0x02) { // Extended Segment Address
+                // Segment address (multiply by 16)
+                const segmentAddress = parseInt(data, 16);
+                baseAddress = segmentAddress << 4;
+                console.log(`Extended Segment Address: base = 0x${baseAddress.toString(16)}`);
+            } else if (recordType === 0x01) { // End of file
+                console.log('End of Intel HEX file');
+                break;
+            }
+        }
+        
+        if (minAddress === Infinity) {
+            throw new Error('No data found in Intel HEX file');
+        }
+        
+        // Convert to contiguous binary array
+        const size = maxAddress - minAddress + 1;
+        const buffer = new ArrayBuffer(size);
+        const view = new Uint8Array(buffer);
+        
+        // Fill with 0xFF (typical for flash memory)
+        view.fill(0xFF);
+        
+        // Copy data
+        for (let addr = minAddress; addr <= maxAddress; addr++) {
+            if (addressMap[addr] !== undefined) {
+                view[addr - minAddress] = addressMap[addr];
+            }
+        }
+        
+        console.log(`Intel HEX parsed: ${lines.length} lines, address range 0x${minAddress.toString(16)}-0x${maxAddress.toString(16)}, binary size: ${size} bytes`);
+        return buffer;
+    }
+
     loadFile(file, path = null) {
         return new Promise((resolve, reject) => {
             // Use the file name as the path if no path is provided
             const filePath = path || file.name;
             
+            // Check if this is a .hex file
+            const isHexFile = file.name.toLowerCase().endsWith('.hex');
+            
             const reader = new FileReader();
             reader.onload = (e) => {
-                const buffer = e.target.result;
+                let buffer;
+                
+                if (isHexFile) {
+                    // Parse Intel HEX format
+                    const hexContent = e.target.result;
+                    try {
+                        buffer = this.parseIntelHex(hexContent);
+                    } catch (error) {
+                        console.error('Error parsing Intel HEX file:', error);
+                        reject(new Error('Invalid Intel HEX format'));
+                        return;
+                    }
+                } else {
+                    // Use raw binary data for .bin files
+                    buffer = e.target.result;
+                }
+                
                 this.files[filePath] = {
                     name: file.name,
                     size: buffer.byteLength,
@@ -82,7 +187,12 @@ class FileServer {
                 reject(error);
             };
             
-            reader.readAsArrayBuffer(file);
+            // Read as text for .hex files, as binary for others
+            if (isHexFile) {
+                reader.readAsText(file);
+            } else {
+                reader.readAsArrayBuffer(file);
+            }
         });
     }
 

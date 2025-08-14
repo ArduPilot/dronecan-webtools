@@ -17,11 +17,11 @@ const FirmwareUpdateModal = ({ open, onClose, targetNodeId }) => {
         const file = event.target.files[0];
         if (!file) return;
         
-        // Validate file extension is .bin
+        // Validate file extension is .bin or .hex
         const fileExtension = file.name.split('.').pop().toLowerCase();
-        if (fileExtension !== 'bin') {
+        if (fileExtension !== 'bin' && fileExtension !== 'hex') {
             setUpdateStatus('error');
-            setStatusMessage('Invalid file type. Please select a .bin firmware file.');
+            setStatusMessage('Invalid file type. Please select a .bin or .hex firmware file.');
             return;
         }
         
@@ -143,7 +143,7 @@ const FirmwareUpdateModal = ({ open, onClose, targetNodeId }) => {
             <DialogTitle>Firmware Update</DialogTitle>
             <DialogContent>
                 <Typography variant="body2" gutterBottom>
-                    Please select the firmware file (.bin) to upload to node {targetNodeId}.
+                    Please select the firmware file (.bin|.hex) to upload to node {targetNodeId}.
                 </Typography>
                 
                 <Button
@@ -156,7 +156,7 @@ const FirmwareUpdateModal = ({ open, onClose, targetNodeId }) => {
                     <input
                         type="file"
                         hidden
-                        accept=".bin"
+                        accept=".bin,.hex"
                         onChange={handleFileChange}
                     />
                 </Button>
