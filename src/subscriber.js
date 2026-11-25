@@ -1,6 +1,4 @@
-import React from 'react';
-import { createRoot } from 'react-dom/client';
 import SubscriberWindow from './SubscriberWindow';
+import mountPanel from './mountPanel';
 
-const root = createRoot(document.getElementById('sub-root'));
-root.render(<SubscriberWindow />); 
+mountPanel(SubscriberWindow);

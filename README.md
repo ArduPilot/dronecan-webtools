@@ -20,7 +20,7 @@ A web-based tool for DroneCAN configuration and monitoring. This application pro
 
 ## Prerequisites
 
-- Node.js (version 14 or higher)
+- Node.js 18.12 or later
 - npm or yarn package manager
 
 ## Installation

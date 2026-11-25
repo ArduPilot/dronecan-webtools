@@ -1,6 +1,4 @@
-import React from 'react';
-import { createRoot } from 'react-dom/client';
 import BusMonitorWindow from './BusMonitorWindow';
+import mountPanel from './mountPanel';
 
-const root = createRoot(document.getElementById('sub-root'));
-root.render(<BusMonitorWindow />); 
+mountPanel(BusMonitorWindow);

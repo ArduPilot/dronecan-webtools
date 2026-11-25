@@ -1,6 +1,4 @@
-import React from 'react';
-import { createRoot } from 'react-dom/client';
 import EscPanelWindow from './EscPanelWindow';
+import mountPanel from './mountPanel';
 
-const root = createRoot(document.getElementById('sub-root'));
-root.render(<EscPanelWindow />); 
+mountPanel(EscPanelWindow);
