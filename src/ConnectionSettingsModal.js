@@ -58,23 +58,10 @@ const DEFAULT_BAUD_RATE = 115200;
 const DEFAULT_WS_HOST = '127.0.0.1';
 const DEFAULT_WS_PORT = '5555';
 
-// Connection types enum
-const CONNECTION_TYPES = {
-    SERIAL: 'serial',
-    WEBSOCKET: 'websocket'
-};
-
-// Add this constant inside the ConnectionSettingsModal.js file, outside the component
-const INTERFACE_BUS_LIST = [0, 1]; //BUS 1, BUS 2 
-
-// Update the state management for connection tracking
 const ConnectionSettingsModal = ({ 
     open, 
     onClose,
-    onConnectionStatusChange,
-    showMessage, // Use this prop for error messages
-    selectedBus,  // New prop
-    onBusChange   // New prop
+    showMessage
 }) => {
     // State for showing/hiding mavlink signing
     const [showMavlinkSigning, setShowMavlinkSigning] = useState(false);
@@ -88,9 +75,6 @@ const ConnectionSettingsModal = ({
     const [wsHost, setWsHost] = useState(DEFAULT_WS_HOST);
     const [wsPort, setWsPort] = useState(DEFAULT_WS_PORT);
     
-    // Move bus state management into this component
-    // const [selectedBus, setSelectedBus] = useState(0);
-    
     // Track active connection
     const [activeConnection, setActiveConnection] = useState(null); // null, 'serial', or 'websocket'
 
@@ -102,9 +86,6 @@ const ConnectionSettingsModal = ({
     const [nodeId, setNodeId] = useState(127);
     // Add mavlink signing state
     const [mavlinkSigning, setMavlinkSigning] = useState('');
-
-    // Add state for the forwarding interval
-    const [forwardingInterval, setForwardingInterval] = useState(null);
 
     // Add this state variable to track connection attempts in progress
     const [connectionInProgress, setConnectionInProgress] = useState(false);
@@ -231,87 +212,6 @@ const ConnectionSettingsModal = ({
         }
     };
 
-    // Handle Serial connection - update to show error messages
-    const handleSerialConnect = async () => {
-        try {
-            if (activeConnection === 'serial') {
-                // Disconnect using close()
-                window.mavlinkSession.close();
-                
-                // Update the UI regardless of connection state
-                setActiveConnection(null);
-                onConnectionStatusChange(false);
-                showMessage('Serial connection closed', 'info');
-                
-                // Clear the forwarding interval
-                if (forwardingInterval) {
-                    clearInterval(forwardingInterval);
-                    setForwardingInterval(null);
-                }
-            } else {
-                // Connect via serial - set in progress state
-                setConnectionInProgress(true);
-                
-                const port = ports.find(p => p === selectedPort);
-                if (port) {
-                    try {
-                        // Disconnect any existing connection first
-                        if (activeConnection) {
-                            window.mavlinkSession.close();
-                            // Clear any existing interval
-                            if (forwardingInterval) {
-                                clearInterval(forwardingInterval);
-                            }
-                        }
-                        
-                        window.mavlinkSession.initWebSerialConnection(port, baudRate);
-                        window.mavlinkSession.addWebSerialOpenHandler(() => {
-                            // Set Node ID and Bus for the local node
-                            window.localNode.setNodeId(parseInt(nodeId, 10));
-                            window.localNode.setBus(selectedBus); 
-
-                        
-                            // Start the mavlinkCanForward interval
-                            const intervalId = setInterval(() => {
-                                if (window.mavlinkSession) {
-                                    window.mavlinkSession.enableMavlinkCanForward(window.localNode.bus);
-                                }
-                            }, 1000);
-                        
-                            setForwardingInterval(intervalId);
-                            setActiveConnection('serial');
-                            setConnectionInProgress(false);
-                            onConnectionStatusChange(true);
-                            showMessage('Serial connection established', 'success');
-                        })
-
-                        window.mavlinkSession.addWebSerialErrorHandler((error) => {
-                            console.error('Serial connection error:', error);
-                            showMessage(`Serial connection failed: ${error.message || 'Could not connect to port'}`, 'error');
-                            // Reset in-progress state on error
-                            setConnectionInProgress(false);
-                        });
-
-                        window.mavlinkSession.webSerialConnect();
-                    } catch (error) {
-                        console.error('Serial connection error:', error);
-                        showMessage(`Serial connection failed: ${error.message || 'Could not connect to port'}`, 'error');
-                        // Reset in-progress state on error
-                        setConnectionInProgress(false);
-                    }
-                } else {
-                    // Reset in-progress state if no port selected
-                    setConnectionInProgress(false);
-                }
-            }
-        } catch (error) {
-            console.error('Error with serial connection:', error);
-            showMessage(`Serial error: ${error.message || 'Unknown error'}`, 'error');
-            // Reset in-progress state on any error
-            setConnectionInProgress(false);
-        }
-    };
-
     // Add this validation function
     const validateIpAddress = (input) => {
         // Check if empty
@@ -353,8 +253,8 @@ const ConnectionSettingsModal = ({
             return 'Port is required';
         }
         
-        const port = parseInt(input, 10);
-        if (isNaN(port) || port < 1 || port > 65535) {
+        const port = Number(input);
+        if (!Number.isInteger(port) || port < 1 || port > 65535) {
             return 'Port must be between 1-65535';
         }
         
@@ -363,8 +263,8 @@ const ConnectionSettingsModal = ({
 
     // Add validation for nodeId
     const validateNodeId = (value) => {
-        const id = parseInt(value, 10);
-        return (isNaN(id) || id < 1 || id > 127) ? 'Node ID must be between 1-127' : '';
+        const id = Number(value);
+        return (!Number.isInteger(id) || id < 1 || id > 127) ? 'Node ID must be between 1-127' : '';
     };
 
     // Update handler to propagate changes to parent
@@ -373,9 +273,6 @@ const ConnectionSettingsModal = ({
         // Only allow numeric values
         if (/^\d*$/.test(value)) {
             setNodeId(value);
-            if (setNodeId) {
-                setNodeId(parseInt(value, 10));
-            }
         }
     };
 
@@ -397,90 +294,46 @@ const ConnectionSettingsModal = ({
         setPortError(validatePort(value));
     };
 
-    // Update the WebSocket connection handler
-    const handleWebSocketConnect = async () => {
+    const handleConnect = async (kind) => {
+        const session = window.mavlinkSession;
+        if (activeConnection) {
+            await session.close();
+            return;
+        }
+        if (kind === 'websocket') {
+            const hostError = validateIpAddress(wsHost);
+            const portError = validatePort(wsPort);
+            setHostError(hostError);
+            setPortError(portError);
+            if (hostError || portError) return;
+        }
+        if (validateNodeId(nodeId)) return;
+        setConnectionInProgress(true);
         try {
-            if (activeConnection === 'websocket') {
-                // Force close the connection
-                window.mavlinkSession.close();
-                setActiveConnection(null);
-                onConnectionStatusChange(false);
-                showMessage('WebSocket connection closed', 'info');
-                if (forwardingInterval) {
-                    clearInterval(forwardingInterval);
-                    setForwardingInterval(null);
-                }
+            await session.closing;
+            const id = Number(nodeId);
+            if (kind === 'serial') {
+                session.initWebSerialConnection(selectedPort, baudRate, id);
             } else {
-                setConnectionInProgress(true);
-                const hostErr = validateIpAddress(wsHost);
-                const portErr = validatePort(wsPort);
-                setHostError(hostErr);
-                setPortError(portErr);
-                if (!hostErr && !portErr) {
-                    if (activeConnection) {
-                        window.mavlinkSession.close();
-                        if (forwardingInterval) {
-                            clearInterval(forwardingInterval);
-                        }
-                    }
-
-                    // Use wss if signing is present, else ws
-                    const wsProtocol = mavlinkSigning ? 'wss' : 'ws';
-                    // Compose the full URL for the websocket
-                    const wsUrl = `${wsProtocol}://${wsHost}:${wsPort}`;
-                    if (window.mavlinkSession.initWebSocketConnection.length === 1) {
-                        // If the function expects a URL
-                        window.mavlinkSession.initWebSocketConnection(wsUrl);
-                    } else {
-                        // Fallback to old signature (host, port)
-                        window.mavlinkSession.initWebSocketConnection(wsHost, parseInt(wsPort, 10), mavlinkSigning);
-                    }
-
-                    window.mavlinkSession.addWebSocketOpenHandler(() => {
-                        console.log('WebSocket connection open');
-                        window.localNode.setNodeId(parseInt(nodeId, 10));
-                        window.localNode.setBus(selectedBus);
-                        const intervalId = setInterval(() => {
-                            if (window.mavlinkSession) {
-                                window.mavlinkSession.enableMavlinkCanForward(window.localNode.bus);
-                            }
-                        }, 1000);
-                        setForwardingInterval(intervalId);
-                        setActiveConnection('websocket');
-                        onConnectionStatusChange(true);
-                        setConnectionInProgress(false);
-                        showMessage('WebSocket connection established', 'success');
-                    });
-
-                    window.mavlinkSession.addWebSocketErrorHandler((error) => {
-                        console.error('WebSocket error:', error);
-                        if (forwardingInterval) {
-                            clearInterval(forwardingInterval);
-                            setForwardingInterval(null);
-                        }
-                        setActiveConnection(null);
-                        onConnectionStatusChange(false);
-                        setConnectionInProgress(false);
-                        let errorMsg = 'Connection failed';
-                        if (error && error.message) {
-                            errorMsg = `Connection failed: ${error.message}`;
-                        } else if (typeof error === 'string') {
-                            errorMsg = `Connection failed: ${error}`;
-                        }
-                        showMessage(errorMsg, 'error');
-                    });
-
-                    window.mavlinkSession.webSocketConnect();
-                } else {
-                    setConnectionInProgress(false);
-                }
+                session.initWebSocketConnection(wsHost, Number(wsPort), mavlinkSigning, id);
             }
+            await session.connect();
         } catch (error) {
-            console.error('Error with WebSocket connection:', error);
-            showMessage(`WebSocket error: ${error.message || 'Unknown error'}`, 'error');
+            await session.close();
             setConnectionInProgress(false);
+            showMessage(error.message || 'Could not connect to adapter', 'error');
         }
     };
+
+    useEffect(() => {
+        const session = window.mavlinkSession;
+        const onChange = (kind) => {
+            setActiveConnection(kind);
+            setConnectionInProgress(false);
+        };
+        session.on('connection-change', onChange);
+        return () => session.off('connection-change', onChange);
+    }, []);
 
     // Load ports on component mount
     useEffect(() => {
@@ -488,15 +341,6 @@ const ConnectionSettingsModal = ({
             listPorts();
         }
     }, [open]);
-
-    // Add cleanup effect to clear the interval when component unmounts
-    useEffect(() => {
-        return () => {
-            if (forwardingInterval) {
-                clearInterval(forwardingInterval);
-            }
-        };
-    }, [forwardingInterval]);
 
     // Update the layout to column direction for connection options
     return (
@@ -609,11 +453,11 @@ const ConnectionSettingsModal = ({
                                     </Button>
                                     <Box sx={{ flexGrow: 1 }} />
                                     <Button 
-                                        onClick={handleSerialConnect}
+                                        onClick={() => handleConnect('serial')}
                                         color={activeConnection === 'serial' ? "error" : "primary"}
                                         variant="contained"
                                         disabled={
-                                            connectionInProgress || // Disable when connection attempt is in progress
+                                            connectionInProgress || !!validateNodeId(nodeId) ||
                                             !selectedPort || 
                                             (activeConnection !== null && activeConnection !== 'serial')
                                         }
@@ -660,11 +504,11 @@ const ConnectionSettingsModal = ({
                                 
                                 <Box sx={{ display: 'flex', justifyContent: 'flex-end' }}>
                                 <Button 
-                                    onClick={handleWebSocketConnect}
+                                    onClick={() => handleConnect('websocket')}
                                     color={activeConnection === 'websocket' ? "error" : "primary"}
                                     variant="contained"
                                     disabled={
-                                        connectionInProgress || // Disable when connection attempt is in progress
+                                        connectionInProgress || !!validateNodeId(nodeId) ||
                                         !!hostError || 
                                         !!portError || 
                                         !wsHost || 

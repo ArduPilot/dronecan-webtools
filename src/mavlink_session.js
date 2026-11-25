@@ -1,135 +1,109 @@
 import { EventEmitter } from 'events';
+import { Buffer } from 'buffer';
 import WebSocketClient from './ws_client';
 import WebSerial from './web_serial';
 import dronecan from './dronecan';
 import './mavlink';
 
 class MavlinkSession extends EventEmitter {
-    constructor() {
+    constructor(localNode) {
         super();
+        this.localNode = localNode;
         this.targetSystem = 255;
         this.targetComponent = 0;
+        this.transport = null;
+        this.forwardingInterval = null;
+        this.closing = Promise.resolve();
+        this.sendCanFrame = this.sendCanFrame.bind(this);
+    }
+
+    attachTransport(transport, kind, nodeId) {
+        if (this.transport) throw new Error('Close the current adapter before connecting another');
+        this.transport = transport;
+        this.targetSystem = 255;
         this.mavlinkProcessor = new MAVLink20Processor(null, this.targetSystem, this.targetComponent);
-        this.wsClient = null;
-        this.serial = null;
-        this.parseBuffer = this.parseBuffer.bind(this);
+        this.mavlinkProcessor.file = transport;
+        this.localNode.on('sendFrame', this.sendCanFrame);
+        transport.addMessageHandler(buffer => this.parseBuffer(buffer, transport));
+        transport.addOpenHandler(() => {
+            if (this.transport !== transport) return;
+            this.localNode.setNodeId(nodeId);
+            if (this.transport !== transport) return;
+            this.forwardingInterval = setInterval(() => this.enableMavlinkCanForward(this.localNode.bus), 1000);
+            this.emit('connection-change', kind);
+        });
+        const disconnect = error => {
+            if (this.transport === transport) this.close(error);
+        };
+        transport.addCloseHandler(() => disconnect());
+        transport.addErrorHandler(disconnect);
     }
 
-    addWebSocketErrorHandler(handler) {
-        if (this.wsClient) {
-            this.wsClient.addErrorHandler(handler);
-        }
-    }
-
-    addWebSocketOpenHandler(handler) {
-        if (this.wsClient) {
-            this.wsClient.addOpenHandler(handler);
-        }
-    }
-
-    initWebSocketConnection(ip, port, mavlinkSigning='') {
-        if (mavlinkSigning) {
-            const enc = new TextEncoder();
-            const data = enc.encode(mavlinkSigning);
-            const hash = mavlink20.sha256(data);
+    initWebSocketConnection(ip, port, signing = '', nodeId = this.localNode.nodeId) {
+        const transport = new WebSocketClient(`${signing ? 'wss' : 'ws'}://${ip}:${port}`);
+        this.attachTransport(transport, 'websocket', nodeId);
+        if (signing) {
+            const hash = mavlink20.sha256(new TextEncoder().encode(signing));
             this.mavlinkProcessor.signing.secret_key = new Uint8Array(hash);
             this.mavlinkProcessor.signing.sign_outgoing = true;
-            this.wsClient = new WebSocketClient(`wss://${ip}:${port}`);
-        } else {
-            this.wsClient = new WebSocketClient(`ws://${ip}:${port}`);
-        }
-        this.mavlinkProcessor.file = this.wsClient;
-
-        this.wsClient.addMessageHandler((buffer) => {
-            this.parseBuffer(buffer);
-        });
-    }
-
-    webSocketConnect() {
-        this.wsClient.connect();
-    }
-
-    initWebSerialConnection(port, baudRate) {
-        this.serial = new WebSerial(port, baudRate);
-        this.mavlinkProcessor.file = this.serial;
-
-        this.serial.addMessageHandler((buffer) => {
-            // console.log('Received buffer:', buffer);
-            this.parseBuffer(buffer);
-        });
-    }
-
-    addWebSerialErrorHandler(handler) {
-        if (this.serial) {
-            this.serial.addErrorHandler(handler);
         }
     }
 
-    addWebSerialOpenHandler(handler) {
-        if (this.serial) {
-            this.serial.addOpenHandler(handler);
-        }
+    initWebSerialConnection(port, baudRate, nodeId = this.localNode.nodeId) {
+        this.attachTransport(new WebSerial(port, baudRate), 'serial', nodeId);
     }
 
-    webSerialConnect() {
-        this.serial.connect();
+    connect() {
+        return this.transport.connect();
     }
 
-    close() {
-        if (this.wsClient) {
-            this.wsClient.close();
-        }
-        if (this.serial) {
-            this.serial.close();
-        }
+    close(error) {
+        const transport = this.transport;
+        if (!transport) return this.closing;
+        if (!error && this.isConnected()) this.localNode.emit('before-disconnect');
+        this.localNode.off('sendFrame', this.sendCanFrame);
+        this.transport = null;
+        clearInterval(this.forwardingInterval);
+        this.forwardingInterval = null;
+        this.mavlinkProcessor.file = null;
+        this.closing = Promise.resolve().then(() => transport.close());
+        if (this.localNode.nodeId !== null) this.localNode.setNodeId(null);
+        else this.localNode.resetSession('disconnected');
+        this.emit('connection-change', null, error);
+        return this.closing;
     }
 
-    parseBuffer(buffer) {
-        // console.log('Parsing buffer:', buffer);
+    parseBuffer(buffer, transport = this.transport) {
+        if (!transport || this.transport !== transport) return;
         const messages = this.mavlinkProcessor.parseBuffer(buffer);
-        if (messages && messages.length > 0) {
-            messages.forEach(this.handleMavlinkMsg.bind(this));
-        } else {
-            // console.error('No messages parsed from buffer or messages is null.');
+        for (const message of messages ?? []) {
+            if (this.transport !== transport) break;
+            this.handleMavlinkMsg(message);
         }
     }
 
     handleMavlinkMsg(message) {
-        switch (message._id) {
-            case mavlink20.MAVLINK_MSG_ID_HEARTBEAT:
-                {
-                    // console.log('Heartbeat message received:', message);
-                    this.targetSystem = message._header.srcSystem;
-                }
-                break;
-            case mavlink20.MAVLINK_MSG_ID_CAN_FRAME:
-                {
-                    // console.log('CAN frame message received:', message);
-                    let isExtended = message.id & dronecan.TransferManager.FlagEFF;
-                    if (isExtended) {
-                        // this.localNode.emit('can-frame', message.id, message.data, message.len);
-                        if (localNode) {
-                            localNode.emit('can-frame', message.id, message.data, message.len);
-                        }
-                    } else {
-                        console.log('Standard frame');
-                    }
-                }
-                break;
-            default:
+        const canfd = message._id === mavlink20.MAVLINK_MSG_ID_CANFD_FRAME;
+        if (message._id === mavlink20.MAVLINK_MSG_ID_HEARTBEAT) {
+            this.targetSystem = message._header.srcSystem;
+        } else if ((canfd || message._id === mavlink20.MAVLINK_MSG_ID_CAN_FRAME) &&
+                   message.bus === this.localNode.bus && (message.id & dronecan.TransferManager.FlagEFF)) {
+            this.localNode.emit('can-frame', message.id, message.data, message.len, message.bus, canfd);
         }
+        this.emit('mav-rx', message);
+    }
 
-        if (this.getMaxListeners('mav-rx') > 0) {
-            this.emit('mav-rx', message);
-        }
+    sendCanFrame(id, data, len, bus = this.localNode.bus, canfd = false) {
+        const FrameMessage = canfd ? mavlink20.messages.canfd_frame : mavlink20.messages.can_frame;
+        const msg = new FrameMessage(this.targetSystem, this.targetComponent, bus, len, id,
+            Buffer.from(data).toString('latin1'));
+        this.sendMavlinkMsg(msg);
     }
 
     sendMavlinkMsg(msg) {
-        if ((this.wsClient && this.wsClient.connected) || (this.serial && this.serial.connected)) {
+        if (this.isConnected()) {
             this.mavlinkProcessor.send(msg);
-            if (this.getMaxListeners('mav-tx') > 0) {
-                this.emit('mav-tx', msg);
-            }
+            this.emit('mav-tx', msg);
         }
     }
 
@@ -152,10 +126,8 @@ class MavlinkSession extends EventEmitter {
     }
 
     isConnected() {
-        return (this.wsClient && this.wsClient.isConnected()) || 
-               (this.serial && this.serial.connected);
+        return this.transport?.isConnected() === true;
     }
-
 }
 
 export default MavlinkSession;

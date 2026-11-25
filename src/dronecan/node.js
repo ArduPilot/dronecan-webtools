@@ -142,6 +142,7 @@ class Node extends EventEmitter {
 
     changeBus(bus) {
         if (bus === this.bus) return;
+        this.emit('before-bus-change', { bus: this.bus, newBus: bus, sessionId: this.sessionId });
         this.bus = bus;
         this.resetSession('bus-changed');
     }
@@ -289,8 +290,8 @@ class Node extends EventEmitter {
         });
         transfer.bus = this.bus;
         transfer.sessionId = this.sessionId;
-        if (serviceNotMessage && !this.nodeId) {
-            this.notifyRequestFailure(transfer, onError, requestError('NO_NODE_ID', 'A service request requires a local node ID'));
+        if (!this.listenerCount('sendFrame') || (serviceNotMessage && !this.nodeId)) {
+            this.notifyRequestFailure(transfer, onError, requestError('NOT_CONNECTED', 'DroneCAN node is unavailable'));
             return null;
         }
 
