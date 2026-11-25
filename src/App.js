@@ -30,7 +30,7 @@ localNode.on('uavcan.protocol.file.Read.Request', (transfer) => {
 
 const App = () => {
     const [nodes, setNodes] = useState({});
-    const [nodesUpdateTimestamp, setNodesUpdateTimestamp] = useState(0);
+    const [, setNodesRevision] = useState(0);
     const [isConnected, setIsConnected] = useState(false);
     const [modalOpen, setModalOpen] = useState(false);
     const [selectedNodeId, setSelectedNodeId] = useState(null);
@@ -82,7 +82,7 @@ const App = () => {
 
     const handleNodeList = (nodeList) => {
         setNodes(nodeList);
-        setNodesUpdateTimestamp(Date.now());
+        setNodesRevision(revision => revision + 1);
     };
 
     useEffect(() => {
@@ -213,12 +213,11 @@ const App = () => {
                     </Box>
                 </Toolbar>
             </AppBar>
-            <Box sx={{ display: 'flex', flexDirection: 'row', flexGrow: 1, height: '95vh', gap: 0.5, p: 1 }}>
+            <Box sx={{ display: 'flex', flexGrow: 1, minHeight: 0, gap: 0.5, p: 1 }}>
                 <CompactSidebar 
                     nodes={nodes}
                     selectedNodeId={selectedNodeId}
                     setSelectedNodeId={setSelectedNodeId}
-                    nodesUpdateTimestamp={nodesUpdateTimestamp}
                 />
                 
                 <Box 
@@ -233,7 +232,6 @@ const App = () => {
                         nodes={nodes}
                         selectedNodeId={selectedNodeId}
                         setSelectedNodeId={setSelectedNodeId.bind(this)}
-                        nodesUpdateTimestamp={nodesUpdateTimestamp}
                     />
                     <NodeLogs/> 
                 </Box>
@@ -245,23 +243,24 @@ const App = () => {
                         gap: 0.5,
                         ml: { xs: 1, md: 0 },
                         flexGrow: 1,
+                        minWidth: 0,
+                        overflow: 'auto',
                     }}
                 >
                     {selectedNodeId && (
-                        <Box sx={{ display: 'flex', flexDirection: 'column', flexGrow: 1, gap: 0.5 }}>
-                            <NodeProperties
+                        <>
+                            <NodeProperties key={`properties-${localNode.sessionId}-${selectedNodeId}`}
                                 nodeId={selectedNodeId}
                                 nodes={nodes}
                                 multiNodeEditorEnable={multiNodeEditorEnable}
                                 setMultiNodeEditorEnable={setMultiNodeEditorEnable.bind(this)}
-                                nodesUpdateTimestamp={nodesUpdateTimestamp}
                             />
-                            <NodeParam
+                            <NodeParam key={`params-${localNode.sessionId}-${selectedNodeId}`}
                                 nodeId={selectedNodeId}
                                 nodes={nodes}
                                 multiNodeEditorEnable={multiNodeEditorEnable}
                             />
-                        </Box>
+                        </>
                     )}
 
                     {selectedNodeId === null && (

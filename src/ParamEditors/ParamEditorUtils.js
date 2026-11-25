@@ -1,4 +1,5 @@
 import React from 'react';
+import { getParamValue } from './param_value';
 import { TextField, Box, Typography, IconButton, Tooltip } from '@mui/material';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import StopIcon from '@mui/icons-material/Stop';
@@ -62,35 +63,16 @@ export const renderInfoField = (label, value, isRtttl = false, handlePlayCallbac
             </Box>
         ) : (
             <Typography variant="body2">
-                {value !== undefined && value !== "" && value !== null ? value : "Unknown"}
+                {value !== undefined && value !== "" && value !== null ? String(value) : "Unknown"}
             </Typography>
         )}
     </Box>
 );
 
 // Export properly with named exports
-export const getParamValues = (param) => {
-    const paramValueField = param.fields.value.msg.unionField;
-    
-    let paramMinValue = "";
-    if (param.fields.min_value.msg && param.fields.min_value.msg.unionField.name !== 'uavcan.protocol.param.Empty') {
-        paramMinValue = param.fields.min_value.msg.unionField.value;
-    }
-    
-    let paramMaxValue = "";
-    if (param.fields.max_value.msg && param.fields.max_value.msg.unionField.name !== 'uavcan.protocol.param.Empty') {
-        paramMaxValue = param.fields.max_value.msg.unionField.value;
-    }
-    
-    let paramDefaultValue = "";
-    if (param.fields.default_value.msg && param.fields.default_value.msg.unionField.name !== 'uavcan.protocol.param.Empty') {
-        paramDefaultValue = param.fields.default_value.msg.unionField.value;
-    }
-    
-    return {
-        paramValueField,
-        paramMinValue,
-        paramMaxValue,
-        paramDefaultValue
-    };
-};
+export const getParamValues = (param) => ({
+    paramValueField: param.fields.value.msg.unionField,
+    paramMinValue: getParamValue(param.fields.min_value) ?? '',
+    paramMaxValue: getParamValue(param.fields.max_value) ?? '',
+    paramDefaultValue: getParamValue(param.fields.default_value, param.fields.name.toString()) ?? '',
+});

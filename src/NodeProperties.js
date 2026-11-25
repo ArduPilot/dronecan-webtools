@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import dronecan from './dronecan';
-import { Paper, Box, Typography, TextField, Button, Stack, Switch, TableContainer, Table, TableHead, TableBody, TableRow, TableCell } from '@mui/material';
+import { Alert, Paper, Box, Typography, TextField, Button, Stack, Switch, TableContainer, Table, TableHead, TableBody, TableRow, TableCell } from '@mui/material';
 import { secondsToTime } from './common';
 import PowerSettingsNewIcon from '@mui/icons-material/PowerSettingsNew';
 import CableIcon from '@mui/icons-material/Cable';
@@ -65,7 +65,7 @@ const NodeProperties = ({ nodeId, nodes, multiNodeEditorEnable, setMultiNodeEdit
 
     return (
         <Box
-            sx={{ flexGrow: 1, bgcolor: 'background.paper', height: 340}}
+            sx={{ flexShrink: 0, bgcolor: 'background.paper' }}
             component={Paper}
             p={1}
         >
@@ -78,6 +78,11 @@ const NodeProperties = ({ nodeId, nodes, multiNodeEditorEnable, setMultiNodeEdit
                     <Switch checked={multiNodeEditorEnable} onChange={(e) => { setMultiNodeEditorEnable(e.target.checked) }} />
                 </Stack>
             </Box>
+            {node.offline && (
+                <Alert severity="warning" sx={{ mt: 1 }}>
+                    Node {nodeId} is offline. Showing last received values.
+                </Alert>
+            )}
             <Box sx={{ display: 'flex', flexDirection: 'row', mt: 1 }}>
                 <TextField
                     label="Node ID"
@@ -98,7 +103,7 @@ const NodeProperties = ({ nodeId, nodes, multiNodeEditorEnable, setMultiNodeEdit
             </Box>
             <Box sx={{ display: 'flex', flexDirection: 'row', mt: 1 }}>
                 <TextField
-                    label="Mode"
+                    label={node.offline ? 'Last reported mode' : 'Mode'}
                     value={mode}
                     fullWidth
                     InputProps={{

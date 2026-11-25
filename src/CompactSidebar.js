@@ -128,21 +128,24 @@ const CompactSidebar = ({
       ) : (
         Object.keys(nodes).map((nodeId) => {
           const node = nodes[nodeId];
-          const mode = node.status.getConstant('mode');
+          const mode = node.offline ? 'OFFLINE' : node.status.getConstant('mode');
           const logCount = logCounts[nodeId] || 0;
           
           return (
             <Tooltip 
               key={nodeId}
-              title={`${node.name || 'Unknown'} (${mode})`} 
+              title={`Node ${nodeId} · ${node.name || 'Unknown'} (${mode})`}
               placement="right"
             >
               <Box
+                component="button"
+                type="button"
                 sx={{
                   position: 'relative',
                   display: 'flex',
-                  width: '30px',
+                  minWidth: '30px',
                   height: '30px',
+                  px: 0.5,
                   flexDirection: 'column',
                   alignItems: 'center',
                   justifyContent: 'center',
@@ -166,6 +169,11 @@ const CompactSidebar = ({
                 >
                   {nodeId}
                 </Typography>
+                {node.offline && (
+                  <Typography component="span" sx={{ fontSize: '0.625rem', lineHeight: 1, color: 'error.main' }}>
+                    Offline
+                  </Typography>
+                )}
                 
                 {logCount > 0 && (
                   <Badge

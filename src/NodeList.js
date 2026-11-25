@@ -32,7 +32,7 @@ const NodeList = ({ nodes, selectedNodeId, setSelectedNodeId }) => {
         let node = nodes[key];
         let status = node.status;
         let health = status.getConstant('health');
-        let mode = status.getConstant('mode');
+        const mode = node.offline ? 'OFFLINE' : status.getConstant('mode');
         return (
             <TableRow key={key} onClick={() => handleRowClick((Number(key)))} style={{ cursor: 'pointer' }}>
                 <TableCell>{key}</TableCell>
@@ -51,7 +51,7 @@ const NodeList = ({ nodes, selectedNodeId, setSelectedNodeId }) => {
             sx={{display: 'flex', flexDirection: 'column', flexGrow: 1, height: '50%'}}
         >
             <Box margin={1} sx={{height: 20}}>
-                <Typography variant="caption">Online Nodes</Typography>
+                <Typography variant="caption">Nodes</Typography>
             </Box>
             <TableContainer
                 sx={{ overflow: 'auto' }}

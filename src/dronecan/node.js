@@ -15,6 +15,10 @@ const REQUEST_TIMEOUT_MS = 1000;
 // OFFLINE_TIMEOUT_MS from uavcan.protocol.NodeStatus.
 const NODE_OFFLINE_TIMEOUT_MS = 3000;
 
+const PARAM_READ_MAX_ATTEMPTS = 4;
+const PARAM_READ_RETRY_TIMEOUT_MS = 2000;
+const MAX_PARAM_INDEX = Number(new DSDL.uavcan_protocol_param_GetSet_Request().fields.index.value_range.max);
+
 function normalizeNodeId(id, allowAnonymous = false) {
     if (allowAnonymous && id == null) return null;
     if (typeof id === 'string' && /^\d+$/.test(id)) id = Number(id);
@@ -31,6 +35,14 @@ function serviceDescriptor(bus, dataTypeId, client, server) {
 
 function requestError(code, message) {
     return Object.assign(new Error(message), { code });
+}
+
+function monitorStatus(status) {
+    return {
+        status,
+        lastStatusAt: performance.now(),
+        offline: status.mode === DSDL.uavcan_protocol_NodeStatus.CONSTANTS.mode.OFFLINE,
+    };
 }
 
 class Node extends EventEmitter {
@@ -59,6 +71,7 @@ class Node extends EventEmitter {
         this.sessionId = 0;
         this.nodeInfoPending = new Map();
         this.nodeParams = {};
+        this.paramFetchStatus = {};
         this.nodeParamsRequestingIndex = {};
         this.nodeParamsRequestingNodeId = null;
         this.subscribers = {};
@@ -94,6 +107,7 @@ class Node extends EventEmitter {
 
         const nodeStatusIntervalID = setInterval(() => {
             this.transferManager.removeInactiveTransfers();
+            this.checkNodeTimeouts();
             if (this.nodeId) {
                 this.status.fields.uptime_sec.value = parseInt((new Date() - this.uptimeBegin) / 1000);
                 this.request({req: this.status, destNodeId: 0, serviceNotMessage: false, priority: REQUEST_PRIORITY});
@@ -157,6 +171,7 @@ class Node extends EventEmitter {
         this.lastHeartbeats.clear();
         this.refreshNodeMonitor();
         this.nodeParams = {};
+        this.paramFetchStatus = {};
         this.nodeInfoPending.clear();
         this.nodeParamsRequestingIndex = {};
         this.nodeParamsRequestingNodeId = null;
@@ -220,6 +235,7 @@ class Node extends EventEmitter {
             this.transferManager.resetSourceReceiveState(transfer);
             delete this.nodeMonitors[nodeId];
             delete this.nodeParams[nodeId];
+            delete this.paramFetchStatus[nodeId];
             delete this.nodeParamsRequestingIndex[nodeId];
             if (this.nodeParamsRequestingNodeId === nodeId) this.nodeParamsRequestingNodeId = null;
             this.nodeInfoPending.delete(nodeId);
@@ -246,6 +262,18 @@ class Node extends EventEmitter {
                 : requestError('NODE_RECONNECTED', `Node ${nodeId} returned after going offline`);
             this.notifyRequestFailure(request, onError, error);
         }
+    }
+
+    checkNodeTimeouts() {
+        const now = performance.now();
+        let changed = false;
+        for (const node of Object.values(this.nodeMonitors)) {
+            if (!node.offline && now - node.lastStatusAt >= NODE_OFFLINE_TIMEOUT_MS) {
+                node.offline = true;
+                changed = true;
+            }
+        }
+        if (changed) this.emit('nodeList', this.nodeMonitors);
     }
 
     handleFrame(frame) {
@@ -432,11 +460,10 @@ class Node extends EventEmitter {
         if (transfer.destNodeId === this.nodeId) {
             const msg = transfer.payload;
             if (msg instanceof DSDL.uavcan_protocol_GetNodeInfo_Response) {
-                const info = msg.toObj();
-                const nodeId = transfer.sourceNodeId;
-                // Heartbeats determine uptime continuity. A service reply can arrive between them.
-                info.status = this.lastHeartbeats.get(nodeId)?.status ?? info.status;
-                this.nodeMonitors[nodeId] = info;
+                const { status, ...info } = msg.toObj();
+                // A delayed info response must not replace or renew a known heartbeat.
+                const node = this.nodeMonitors[transfer.sourceNodeId] ??= monitorStatus(status);
+                Object.assign(node, info);
             } else {
                 console.error('msg is not instance of uavcan_protocol_GetNodeInfo_Response');
             }
@@ -446,10 +473,8 @@ class Node extends EventEmitter {
     updateNodeMonitorStatus(transfer) {
         const msg = transfer.payload;
         if (msg instanceof DSDL.uavcan_protocol_NodeStatus) {
-            if (this.nodeMonitors[transfer.sourceNodeId] === undefined) {
-                this.nodeMonitors[transfer.sourceNodeId] = {};
-            }
-            this.nodeMonitors[transfer.sourceNodeId].status = msg.toObj();
+            const node = this.nodeMonitors[transfer.sourceNodeId] ??= {};
+            Object.assign(node, monitorStatus(msg.toObj()));
         } else {
             console.error('msg is not instance of uavcan_protocol_NodeStatus');
         }
@@ -571,6 +596,55 @@ class Node extends EventEmitter {
             this.nodeParams[transfer.sourceNodeId] = {};
         }
         this.nodeParams[transfer.sourceNodeId][paramIndex] = msg;
+        this.emit('node-params', transfer.sourceNodeId);
+    }
+
+    fetchAllNodeParams(nodeId) {
+        nodeId = normalizeNodeId(nodeId);
+        // Replacing this node's cache also invalidates callbacks from an earlier fetch or edit.
+        const params = {};
+        this.nodeParams[nodeId] = params;
+        const setStatus = (phase, details = {}) => {
+            if (this.nodeParams[nodeId] !== params) return;
+            this.paramFetchStatus[nodeId] = { phase, ...details };
+            this.emit('node-params', nodeId);
+        };
+        const fetchIndex = (index, attempt = 1) => {
+            if (this.nodeParams[nodeId] !== params) return;
+            const onError = error => {
+                const waitForId = error.code === 'REQUEST_PENDING';
+                if (attempt >= PARAM_READ_MAX_ATTEMPTS || (!waitForId && error.code !== 'REQUEST_TIMEOUT')) {
+                    setStatus('failed', { index, attempt, error: error.message });
+                    return;
+                }
+                setStatus('retrying', { index, attempt: attempt + 1, maxAttempts: PARAM_READ_MAX_ATTEMPTS });
+                if (this.nodeParams[nodeId] !== params) return;
+                // At wraparound a timed-out ID may still be reserved for late replies.
+                if (waitForId) {
+                    setTimeout(() => fetchIndex(index, attempt + 1), TransferManager.TRANSFER_TIMEOUT_MS);
+                } else {
+                    fetchIndex(index, attempt + 1);
+                }
+            };
+            try {
+                this.fetchNodeParam(nodeId, index, '', transfer => {
+                    if (this.nodeParams[nodeId] !== params) return;
+                    if (transfer.payload.fields.name.items.length === 0) {
+                        setStatus('complete');
+                        return;
+                    }
+                    if (attempt > 1) this.paramFetchStatus[nodeId] = { phase: 'loading' };
+                    this.updateNodeParamsFromResponse(transfer, index);
+                    if (index === MAX_PARAM_INDEX) setStatus('complete');
+                    else fetchIndex(index + 1);
+                }, onError, attempt === 1 ? REQUEST_TIMEOUT_MS : PARAM_READ_RETRY_TIMEOUT_MS);
+            } catch (error) {
+                setStatus('failed', { index, attempt, error: error.message });
+            }
+        };
+
+        setStatus('loading');
+        fetchIndex(0);
     }
 
     setNodeParam(sourceNodeId, index, value, onError = null) {
