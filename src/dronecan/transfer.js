@@ -102,6 +102,7 @@ class Transfer {
             if (padding) payload = Buffer.concat([payload, Buffer.alloc(padding)]);
         }
 
+        this._payloadBytes = payload;
         if (payload.length > frameMax - 1) {
             const baseCrc = crc16FromBytes(packBigInt64LE(req.getDataTypeSignature()));
             const crc = crc16FromBytes(payload, baseCrc);

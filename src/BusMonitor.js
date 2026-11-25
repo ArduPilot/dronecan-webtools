@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { 
     Box, Paper, Typography, Table, TableBody, TableCell, TableContainer, 
     TableHead, TableRow, IconButton, Toolbar, AppBar, Button,
@@ -10,6 +10,62 @@ import PauseIcon from '@mui/icons-material/Pause';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import SaveIcon from '@mui/icons-material/Save';
 import { toYaml } from './dronecan/message_format_utils';
+import { createMonitorBuffer } from './monitor_buffer';
+
+const MAX_TRANSFERS = 1000;
+const TIME_FORMAT = new Intl.DateTimeFormat('en-US', {
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    fractionalSecondDigits: 3
+});
+
+const formatHex = (bytes) => bytes
+    ? Array.from(bytes, byte => byte.toString(16).padStart(2, '0').toUpperCase()).join(' ')
+    : '';
+
+const getPayloadObject = (item) => item.txPayload ?? item.rxPayload?.toObj();
+
+const TransferRow = memo(({ item, onSelect }) => (
+    <TableRow
+        onClick={() => onSelect(item)}
+        sx={{
+            backgroundColor: item.direction === 'TX' ? 'rgba(200, 250, 200, 0.05)' : 'rgba(200, 200, 255, 0.05)',
+            cursor: 'pointer',
+            '&:hover': {
+                backgroundColor: item.direction === 'TX' ? 'rgba(200, 250, 200, 0.2)' : 'rgba(200, 200, 255, 0.2)',
+            }
+        }}
+    >
+        <TableCell
+            sx={{
+                color: item.direction === 'TX' ? '#2e7d32' : '#1565c0',
+                fontWeight: 'bold',
+                width: '40px',
+                padding: '2px 8px'
+            }}
+        >
+            {item.direction}
+        </TableCell>
+        <TableCell>{TIME_FORMAT.format(item.timestampMs)}</TableCell>
+        <TableCell sx={{ fontFamily: 'monospace' }}>{item.frameId}</TableCell>
+        <TableCell
+            sx={{
+                maxWidth: '200px',
+                overflowX: 'auto',
+                whiteSpace: 'nowrap',
+                fontFamily: 'monospace',
+                fontSize: '0.75rem'
+            }}
+        >
+            {formatHex(item.payloadBytes)}
+        </TableCell>
+        <TableCell>{item.sourceNodeId}</TableCell>
+        <TableCell>{item.destNodeId || ''}</TableCell>
+        <TableCell>{item.dataType}</TableCell>
+    </TableRow>
+));
 
 const BusMonitor = () => {
     const [transfers, setTransfers] = useState([]);
@@ -19,19 +75,21 @@ const BusMonitor = () => {
     const [detailsOpen, setDetailsOpen] = useState(false);
     const [messageYaml, setMessageYaml] = useState('');
     const tableContainerRef = useRef(null);
-    const maxTransfers = 1000; // Maximum number of transfers to store
+    const nextId = useRef(0);
+    const paused = useRef(false);
+    const [buffer] = useState(() => createMonitorBuffer(MAX_TRANSFERS, setTransfers));
 
     // Handle row click to show details
-    const handleRowClick = (transfer) => {
+    const handleRowClick = useCallback((transfer) => {
         setSelectedTransfer(transfer);
         
         // Convert the message to YAML format if it has payload
         let yamlText = '';
-        if (transfer.data && transfer.data.toObj) {
-            const msgObj = transfer.data.toObj();
+        const msgObj = getPayloadObject(transfer);
+        if (msgObj) {
             yamlText = `### Message details\n`;
             yamlText += `Direction: ${transfer.direction}\n`;
-            yamlText += `Time: ${transfer.timestamp}\n`;
+            yamlText += `Time: ${TIME_FORMAT.format(transfer.timestampMs)}\n`;
             yamlText += `CAN ID: ${transfer.frameId}\n`;
             yamlText += `Source Node: ${transfer.sourceNodeId}\n`;
             yamlText += `Destination Node: ${transfer.destNodeId || 'Broadcast'}\n`;
@@ -41,16 +99,16 @@ const BusMonitor = () => {
         } else {
             yamlText = `No detailed payload data available for this transfer.\n\n`;
             yamlText += `Direction: ${transfer.direction}\n`;
-            yamlText += `Time: ${transfer.timestamp}\n`;
+            yamlText += `Time: ${TIME_FORMAT.format(transfer.timestampMs)}\n`;
             yamlText += `CAN ID: ${transfer.frameId}\n`;
-            yamlText += `Hex Data: ${transfer.hexData}\n`;
+            yamlText += `Hex Data: ${formatHex(transfer.payloadBytes)}\n`;
             yamlText += `Source Node: ${transfer.sourceNodeId}\n`;
             yamlText += `Destination Node: ${transfer.destNodeId || 'Broadcast'}\n`;
         }
         
         setMessageYaml(yamlText);
         setDetailsOpen(true);
-    };
+    }, []);
 
     // Close the details dialog
     const handleCloseDetails = () => {
@@ -58,67 +116,38 @@ const BusMonitor = () => {
     };
 
     useEffect(() => {
-        const localNode = window.opener.localNode;
+        const localNode = window.opener?.localNode;
         if (!localNode) return;
 
-        // Function to handle incoming transfers
         const handleTransfer = (transfer, direction) => {
-            if (isPaused) return;
-            const now = new Date();
-            const timeString = now.toLocaleTimeString('en-US', { 
-                hour12: false, 
-                hour: '2-digit', 
-                minute: '2-digit', 
-                second: '2-digit',
-                fractionalSecondDigits: 3
-            });
-
-            // Format payload bytes as hex
-            let hexData = '';
-            if (transfer._payloadBytes && transfer._payloadBytes.length > 0) {
-                hexData = Array.from(transfer._payloadBytes)
-                    .map(byte => byte.toString(16).padStart(2, '0').toUpperCase())
-                    .join(' ');
-            }
-
-            setTransfers(prevTransfers => {
-                const newTransfers = [...prevTransfers, {
-                    timestamp: timeString,
-                    timestampMs: now.getTime(),
-                    transfer: transfer,
-                    dataType: transfer.payload ? transfer.payload.name : 'Unknown',
-                    sourceNodeId: transfer.sourceNodeId,
-                    destNodeId: transfer.destNodeId,
-                    frameId: `0x${transfer.messageId.toString(16).toUpperCase()}`,
-                    data: transfer.payload,
-                    _payloadBytes: transfer._payloadBytes,
-                    hexData: hexData,
-                    direction: direction,
-                    rawData: transfer.payload ? JSON.stringify(transfer.payload.toObj()) : '{}',
-                    id: now.getTime() + Math.random().toString(36).substring(2, 9)
-                }];
-
-                // Keep only the last maxTransfers items
-                if (newTransfers.length > maxTransfers) {
-                    return newTransfers.slice(newTransfers.length - maxTransfers);
-                }
-                return newTransfers;
+            if (paused.current) return;
+            const { payload } = transfer;
+            buffer.push({
+                id: nextId.current++,
+                timestampMs: Date.now(),
+                dataType: payload?.name ?? 'Unknown',
+                sourceNodeId: transfer.sourceNodeId,
+                destNodeId: transfer.destNodeId,
+                frameId: `0x${transfer.messageId.toString(16).toUpperCase()}`,
+                payloadBytes: transfer._payloadBytes,
+                // The local node can reuse and mutate TX messages such as NodeStatus.
+                txPayload: direction === 'TX' ? payload?.toObj() : null,
+                rxPayload: direction === 'RX' ? payload : null,
+                direction
             });
         };
 
-        // Subscribe to both TX and RX transfers
         const handleTransferRx = (transfer) => handleTransfer(transfer, 'RX');
         const handleTransferTx = (transfer) => handleTransfer(transfer, 'TX');
-
         localNode.on('transfer-rx', handleTransferRx);
         localNode.on('transfer-tx', handleTransferTx);
 
         return () => {
-            // Clean up subscriptions
             localNode.off('transfer-rx', handleTransferRx);
             localNode.off('transfer-tx', handleTransferTx);
+            buffer.clear();
         };
-    }, [isPaused, maxTransfers]);
+    }, [buffer]);
 
     useEffect(() => {
         if (autoScroll && tableContainerRef.current && !isPaused) {
@@ -127,11 +156,14 @@ const BusMonitor = () => {
     }, [transfers, autoScroll, isPaused]);
 
     const handleClearTransfers = () => {
+        buffer.clear();
         setTransfers([]);
     };
 
     const togglePause = () => {
-        setIsPaused(!isPaused);
+        paused.current = !paused.current;
+        if (paused.current) buffer.flush();
+        setIsPaused(paused.current);
     };
 
     const toggleAutoScroll = () => {
@@ -142,24 +174,18 @@ const BusMonitor = () => {
         const headers = ['Direction', 'Timestamp', 'CAN ID (Hex)', 'Hex Data', 'Src Node ID', 'Dst Node ID', 'Data Type', 'Raw Data'];
         const csvRows = [
             headers.join(','),
-            ...transfers.map(transfer => {
-                // Format payload bytes for CSV export
-                let hexData = '';
-                if (transfer._payloadBytes && transfer._payloadBytes.length > 0) {
-                    hexData = Array.from(transfer._payloadBytes)
-                        .map(byte => byte.toString(16).padStart(2, '0').toUpperCase())
-                        .join(' ');
-                }
-                
+            ...buffer.snapshot().map(transfer => {
+                const rawData = JSON.stringify(getPayloadObject(transfer) ?? {},
+                    (_, value) => typeof value === 'bigint' ? value.toString() : value);
                 return [
                     transfer.direction,
-                    transfer.timestamp,
+                    TIME_FORMAT.format(transfer.timestampMs),
                     transfer.frameId,
-                    `"${hexData}"`,
+                    `"${formatHex(transfer.payloadBytes)}"`,
                     transfer.sourceNodeId,
                     transfer.destNodeId,
                     transfer.dataType,
-                    `"${transfer.rawData.replace(/"/g, '""')}"`
+                    `"${rawData.replace(/"/g, '""')}"`
                 ].join(',');
             })
         ];
@@ -175,6 +201,7 @@ const BusMonitor = () => {
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
     };
 
     return (
@@ -198,6 +225,7 @@ const BusMonitor = () => {
                         />
                         <IconButton 
                             color={isPaused ? "default" : "inherit"} 
+                            aria-label={isPaused ? 'Resume bus monitor' : 'Pause bus monitor'}
                             onClick={togglePause}
                             size="small"
                         >
@@ -205,6 +233,7 @@ const BusMonitor = () => {
                         </IconButton>
                         <IconButton 
                             color="inherit" 
+                            aria-label="Clear bus monitor"
                             onClick={handleClearTransfers}
                             size="small"
                         >
@@ -243,44 +272,7 @@ const BusMonitor = () => {
                     </TableHead>
                     <TableBody>
                         {transfers.map((item) => (
-                            <TableRow 
-                                key={item.id}
-                                onClick={() => handleRowClick(item)}
-                                sx={{
-                                    backgroundColor: item.direction === 'TX' ? 'rgba(200, 250, 200, 0.05)' : 'rgba(200, 200, 255, 0.05)',
-                                    cursor: 'pointer',
-                                    '&:hover': {
-                                        backgroundColor: item.direction === 'TX' ? 'rgba(200, 250, 200, 0.2)' : 'rgba(200, 200, 255, 0.2)',
-                                    }
-                                }}
-                            >
-                                <TableCell 
-                                    sx={{ 
-                                        color: item.direction === 'TX' ? '#2e7d32' : '#1565c0',
-                                        fontWeight: 'bold',
-                                        width: '40px',
-                                        padding: '2px 8px'
-                                    }}
-                                >
-                                    {item.direction}
-                                </TableCell>
-                                <TableCell>{item.timestamp}</TableCell>
-                                <TableCell sx={{ fontFamily: 'monospace' }}>{item.frameId}</TableCell>
-                                <TableCell 
-                                    sx={{ 
-                                        maxWidth: '200px',
-                                        overflowX: 'auto',
-                                        whiteSpace: 'nowrap',
-                                        fontFamily: 'monospace',
-                                        fontSize: '0.75rem'
-                                    }}
-                                >
-                                    {item.hexData}
-                                </TableCell>
-                                <TableCell>{item.sourceNodeId}</TableCell>
-                                <TableCell>{item.destNodeId || ''}</TableCell>
-                                <TableCell>{item.dataType}</TableCell>
-                            </TableRow>
+                            <TransferRow key={item.id} item={item} onSelect={handleRowClick} />
                         ))}
                     </TableBody>
                 </Table>
@@ -297,7 +289,7 @@ const BusMonitor = () => {
                 }}
             >
                 <Typography variant="body2" color="textSecondary">
-                    Showing {transfers.length} of max {maxTransfers} transfers
+                    Showing {transfers.length} of max {MAX_TRANSFERS} transfers
                 </Typography>
                 {isPaused && (
                     <Typography 
