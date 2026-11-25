@@ -14,6 +14,7 @@ class WebSocketClient {
         this.connected = false;
         console.log(`Connecting to WebSocket at ${this.url}`);
         this.socket = new WebSocket(this.url);
+        this.socket.binaryType = 'arraybuffer';
 
         this.socket.addEventListener('open', (event) => {
             this.handleOpen(event);
@@ -44,21 +45,10 @@ class WebSocketClient {
     }
 
     handleMessage(event) {
-        if (event.data instanceof Blob) {
-            this.handleBlobMessage(event);
-        } else {
-            console.log('Message from server:', event.data);
+        if (event.data instanceof ArrayBuffer) {
+            const bytes = new Uint8Array(event.data);
+            this.messageHandlers.forEach(handler => handler(bytes));
         }
-    }
-
-    handleBlobMessage = (event) => {
-        const reader = new FileReader();
-        reader.onload = () => {
-            const arrayBuffer = reader.result;
-            const buffer = new Uint8Array(arrayBuffer);
-            this.messageHandlers.forEach(handler => handler(buffer));
-        };
-        reader.readAsArrayBuffer(event.data);
     }
 
     addMessageHandler(handler) {
@@ -88,8 +78,7 @@ class WebSocketClient {
 
     write(buffer) {
         if (this.isConnected() && this.socket) {
-            const binaryData = new Blob([new Uint8Array(buffer)]);
-            this.socket.send(binaryData);
+            this.socket.send(new Uint8Array(buffer));
             return true;
         } else {
             console.error('WebSocket is not open. Ready state:', this.socket?.readyState);

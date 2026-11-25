@@ -9,6 +9,8 @@ class WebSerial {
         this.errorHandlers = [];
         this.closeHandlers = [];
         this.isClosed = false;
+        this.opening = null;
+        this.closing = null;
         this.readLoopActive = false; // Track if read loop is running
         this.connected = false; // Track if the connection is established
         this.connectionStatusHandlers = []; // Handlers for connection status changes
@@ -53,24 +55,24 @@ class WebSerial {
     }
 
     async connect() {
+        if (this.isClosed || this.opening) return;
         try {
             if (!this.port) {
-                console.error('No port available to connect.');
-                return;
+                throw new Error('No port available to connect.');
             }
             // console.log('Port selected:', this.port);
             const baudRate = this.baudRate;
 
-            await this.port.open({ baudRate });
+            this.opening = this.port.open({ baudRate });
+            await this.opening;
+            if (this.isClosed) return;
             // console.log('Port opened:', this.port);
-            this.handleOpen();
-            this.isClosed = false;
             
             if (this.port.writable) {
                 this.writer = this.port.writable.getWriter();
             }  
 
-            if (this.port.readable) {
+            if (this.port.readable && this.writer) {
                 // Store reader as instance property so we can access it during close
                 this.reader = this.port.readable.getReader();
                 const messageHandlers = this.messageHandlers;
@@ -80,18 +82,22 @@ class WebSerial {
                 
                 // Update connection status
                 this.updateConnectionStatus(true);
+                this.handleOpen();
                 
                 const readLoop = async () => {
                     try {
                         while (this.readLoopActive && this.reader) {
                             const { value, done } = await this.reader.read();
+                            if (this.isClosed) break;
                             if (done) {
+                                this.close();
                                 break;
                             }
                             
                             messageHandlers.forEach(handler => handler(value));
                         }
                     } catch (error) {
+                        if (this.isClosed) return;
                         if (error.name === 'BreakError') {
                             // console.log('BreakError received - this is expected during certain operations');
                             
@@ -132,9 +138,7 @@ class WebSerial {
                             this.handleError(error);
                             
                             // Update connection status if there's a critical error
-                            if (!['BreakError', 'NetworkError'].includes(error.name)) {
-                                this.updateConnectionStatus(false);
-                            }
+                            this.updateConnectionStatus(false);
                         }
                     }
                 };
@@ -142,10 +146,10 @@ class WebSerial {
                 readLoop();
 
             } else {
-                console.error('Port is not readable or writable.');
-                this.updateConnectionStatus(false);
+                throw new Error('Port is not readable or writable');
             }
         } catch (error) {
+            if (this.isClosed) return;
             this.handleError(error);
             this.updateConnectionStatus(false);
         }
@@ -184,15 +188,6 @@ class WebSerial {
         this.errorHandlers.push(handler);
     }
 
-    handleClose() {
-        if (!this.isClosed) { // Check if the port is already closed
-            console.log('Serial port is closed now.');
-            this.isClosed = true; // Set the flag to true
-            this.updateConnectionStatus(false); // Update connection status
-            this.closeHandlers.forEach(handler => handler());
-        }
-    }
-
     addCloseHandler(handler) {
         this.closeHandlers.push(handler);
     }
@@ -227,22 +222,27 @@ class WebSerial {
         }
     }
 
-    async close() {
+    close() {
+        if (this.closing) return this.closing;
+        this.isClosed = true;
+        this.readLoopActive = false;
+        this.closing = this.releasePort();
+        this.updateConnectionStatus(false);
+        this.closeHandlers.forEach(handler => handler());
+        return this.closing;
+    }
+
+    async releasePort() {
         try {
-            // First, set the flag to prevent multiple close attempts
-            if (this.isClosed) {
-                console.log('Port already closed');
-                return;
-            }
-            
-            this.isClosed = true;
-            
-            // Signal read loop to stop
-            this.readLoopActive = false;
-            
-            // Update connection status
-            this.updateConnectionStatus(false);
-            
+            // port.open() cannot be aborted by the browser. Wait for it before
+            // releasing any locks or making the port available for reconnection.
+            await this.opening;
+        } catch {
+            this.port = null;
+            return;
+        }
+
+        try {
             // Cancel and release reader if it exists
             if (this.reader) {
                 try {
@@ -283,7 +283,7 @@ class WebSerial {
             await new Promise(resolve => setTimeout(resolve, 50));
             
             // Close the port last
-            if (this.port) {
+            if (this.opening && this.port) {
                 try {
                     console.log('Closing port...');
                     await this.port.close();
@@ -291,13 +291,12 @@ class WebSerial {
                 } catch (portError) {
                     console.error('Error while closing port:', portError);
                 }
-                this.port = null;
             }
-            
-            this.handleClose();
         } catch (error) {
             console.error('Error in close method:', error);
             this.handleError(error);
+        } finally {
+            this.port = null;
         }
     }
 }

@@ -20,20 +20,9 @@ import LanIcon from '@mui/icons-material/Lan';
 import CompactSidebar from './CompactSidebar';
 import DNAServerModal from './DNAServerModal';
 
-window.mavlinkSession = new MavlinkSession();
 window.localNode = new dronecan.Node({name: "com.vimdrones.web_gui"});
-localNode.on('sendFrame', (messageId, data, len) => {
-    const msg = new mavlink20.messages.can_frame(
-        mavlinkSession.targetSystem, // target_system
-        mavlinkSession.targetComponent, // target_component
-        localNode.bus,
-        len,
-        messageId,
-        data.toString('binary')
-    );
-    mavlinkSession.sendMavlinkMsg(msg);
-});
-
+window.mavlinkSession = new MavlinkSession(window.localNode);
+window.addEventListener('pagehide', () => window.mavlinkSession.close());
 
 localNode.on('uavcan.protocol.file.Read.Request', (transfer) => {
     FileServer.handleReadRequest(transfer, localNode);
@@ -80,14 +69,6 @@ const App = () => {
         setSnackbarOpen(true);
     };
 
-    const handleConnectionStatusChange = (isConnected) => {
-        setIsConnected(isConnected);
-        showMessage(
-            isConnected ? 'Successfully connected to device' : 'Disconnected from device',
-            isConnected ? 'success' : 'info'
-        );
-    };
-
     const handleBusChange = (event) => {
         const newBus = event.target.value;
         if (newBus === selectedBus) return;
@@ -105,9 +86,22 @@ const App = () => {
     };
 
     useEffect(() => {
+        const onSessionChange = () => {
+            setSelectedNodeId(null);
+            setMultiNodeEditorEnable(false);
+        };
+        const onConnectionChange = (kind, error) => {
+            setIsConnected(Boolean(kind));
+            const message = kind ? `Connected via ${kind}` : 'Adapter disconnected';
+            showMessage(error?.message || message, error ? 'error' : (kind ? 'success' : 'info'));
+        };
         localNode.on('nodeList', handleNodeList);
+        localNode.on('session-change', onSessionChange);
+        mavlinkSession.on('connection-change', onConnectionChange);
         return () => {
-            localNode.off('nodeList');
+            localNode.off('nodeList', handleNodeList);
+            localNode.off('session-change', onSessionChange);
+            mavlinkSession.off('connection-change', onConnectionChange);
         };
     }, []);
 
@@ -115,10 +109,7 @@ const App = () => {
         setModalOpen(true);
     };
 
-    const handleCloseModal = (serverRunning) => {
-        setModalOpen(false);
-        setDnaServerActive(serverRunning);
-    };
+    const handleCloseModal = () => setModalOpen(false);
 
     const handleOpenDnaModal = () => {
         setDnaModalOpen(true);
@@ -281,10 +272,7 @@ const App = () => {
             <ConnectionSettingsModal
                 open={modalOpen}
                 onClose={handleCloseModal}
-                onConnectionStatusChange={handleConnectionStatusChange}
                 showMessage={showMessage.bind(this)}
-                selectedBus={selectedBus}
-                onBusChange={handleBusChange}
             />
             <DNAServerModal
                 open={dnaModalOpen}
