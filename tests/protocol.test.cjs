@@ -633,3 +633,16 @@ test('writing a parameter leaves the cached value and name intact until response
     assert.equal(value.unionField.toString(), 'before');
     assert.equal(stringWrite.payload.fields.value.msg.unionField.toString(), 'after');
 });
+
+test('validates ESC int14 data and actuator uint8 IDs before sending commands', t => {
+    const { node, frames } = createNode(t, 127);
+    assert.throws(() => node.sendUavcanEquipmentEscRawCommand(0, Array(21).fill(0)), RangeError);
+    assert.throws(() => node.sendUavcanEquipmentEscRawCommand(0, [8192]), RangeError);
+    assert.throws(() => node.sendUavcanEquipmentEscRawCommand(0, [0.5]), RangeError);
+    assert.throws(() => node.sendUavcanEquipmentActuatorArrayCommand(0, [{ id: 256, type: 0, value: 0 }]), RangeError);
+    assert.throws(() => node.sendUavcanEquipmentActuatorArrayCommand(0, [{ id: 0.5, type: 0, value: 0 }]), RangeError);
+    assert.throws(() => node.sendUavcanEquipmentActuatorArrayCommand(0, [{ id: 0, type: 0, value: NaN }]), RangeError);
+    assert.equal(frames.length, 0);
+    assert(node.sendUavcanEquipmentEscRawCommand(0, Array(20).fill(8191)));
+    assert(node.sendUavcanEquipmentActuatorArrayCommand(0, [{ id: 255, type: 0, value: 1 }]));
+});

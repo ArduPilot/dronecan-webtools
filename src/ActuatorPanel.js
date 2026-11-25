@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { 
   Paper, Box, Typography, Card, CardContent, Slider, TextField, AppBar, 
   Toolbar, Button, IconButton, FormGroup, FormControlLabel, Checkbox, 
@@ -10,6 +10,9 @@ import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import PauseIcon from '@mui/icons-material/Pause';
 import CheckBoxIcon from '@mui/icons-material/CheckBox';
 import SettingsIcon from '@mui/icons-material/Settings';
+import {
+    TELEMETRY_WINDOW_MS, TELEMETRY_REFRESH_MS, sampleTelemetryRate, expireTelemetryRates
+} from './telemetry_rate';
 
 const MAX_ACTUATOR_IDS = 256;
 
@@ -34,19 +37,25 @@ const DEFAULT_RANGES = {
   3: { min: -20, max: 20 }      // Speed range (adjustable)
 };
 
-const ActuatorPanel = () => {
+const ActuatorPanel = ({ localNode, isCurrentSession }) => {
+    const worker = useRef(null);
+    const safetyEnabled = useRef(false);
+    const [sendSafety, setSendSafety] = useState(false);
     const [enabledActuatorIds, setEnabledActuatorIds] = useState(
       Array(MAX_ACTUATOR_IDS).fill(false).map((_, i) => i < 4)
     );
     const [actuatorData, setActuatorData] = useState([]);
     const [commandValues, setCommandValues] = useState({});
+    const [commandTypes, setCommandTypes] = useState({});
+    const [sliderMins, setSliderMins] = useState({});
+    const [sliderMaxs, setSliderMaxs] = useState({});
     
     const [showSettingsModal, setShowSettingsModal] = useState(false);
     
     const [defaultRanges, setDefaultRanges] = useState({...DEFAULT_RANGES});
     
     const [broadcastRate, setBroadcastRate] = useState(10);
-    const [isPaused, setIsPaused] = useState(false);
+    const [isPaused, setIsPaused] = useState(true);
     const [showIdSelector, setShowIdSelector] = useState(false);
     
     const nodeId = 0;
@@ -56,7 +65,16 @@ const ActuatorPanel = () => {
       .filter(id => id !== null);
 
     const togglePause = () => {
+        setCommandValues({});
         setIsPaused(!isPaused);
+    };
+
+    const handleSendSafetyChange = (event) => {
+        if (!isCurrentSession()) return;
+        const checked = event.target.checked;
+        safetyEnabled.current = checked;
+        setSendSafety(checked);
+        worker.current.postMessage({ type: 'safety', command: checked ? 'start' : 'stop' });
     };
 
     const handleBroadcastRateChange = (e) => {
@@ -111,25 +129,6 @@ const ActuatorPanel = () => {
         });
     };
 
-    useEffect(() => {
-        const activeIds = activeActuatorIds;
-        
-        const initialCommandValues = {};
-        activeIds.forEach(id => {
-            initialCommandValues[id] = commandValues[id] || 0;
-        });
-        setCommandValues(initialCommandValues);
-        
-        const initialActuatorData = activeIds.map(id => ({
-            actuator_id: id,
-            position: null,
-            force: null,
-            speed: null,
-            power_rating_pct: null,
-        }));
-        setActuatorData(initialActuatorData);
-    }, [enabledActuatorIds]);
-
     const handleCommandChange = (id, value) => {
         setCommandValues(prev => ({
             ...prev,
@@ -160,63 +159,91 @@ const ActuatorPanel = () => {
     };
 
     useEffect(() => {
-        const localNode = window.opener?.localNode;
-        if (!localNode) return;
-
         const handleActuatorData = (transfer) => {
             const msg = transfer.payload;
             if (!msg) return;
-            
+
             try {
                 const msgObj = msg.toObj ? msg.toObj() : msg;
-                if (!msgObj || typeof msgObj.actuator_id !== 'number') return;
-                
-                if (enabledActuatorIds[msgObj.actuator_id]) {
-                    setActuatorData(prev => {
-                        const existingIndex = prev.findIndex(a => a.actuator_id === msgObj.actuator_id);
-                        const newData = [...prev];
-                        
-                        const updatedActuator = {
-                            actuator_id: msgObj.actuator_id,
-                            position: msgObj.position,
-                            force: msgObj.force,
-                            speed: msgObj.speed,
-                            power_rating_pct: msgObj.power_rating_pct || null,
-                            status_flags: msgObj.status_flags
-                        };
-                        
-                        if (existingIndex !== -1) {
-                            newData[existingIndex] = updatedActuator;
-                        } else {
-                            newData.push(updatedActuator);
-                        }
-                        
-                        return newData;
-                    });
-                }
+                const actuatorId = msgObj?.actuator_id;
+                if (!Number.isInteger(actuatorId) || !enabledActuatorIds[actuatorId]) return;
+
+                const sourceNodeId = transfer.sourceNodeId;
+                // Both sampling and expiry use the popup's monotonic clock.
+                const receivedAt = performance.now();
+                setActuatorData(previous => {
+                    const index = previous.findIndex(actuator => actuator.actuator_id === actuatorId);
+                    const prior = previous[index];
+                    const previousRate = prior?.sourceNodeId === sourceNodeId ? prior?.rate : null;
+                    // After a gap, estimate from the adjacent frames without carrying over an older burst.
+                    const rate = previousRate && receivedAt - previousRate.lastReceivedAt >= TELEMETRY_WINDOW_MS
+                        ? sampleTelemetryRate(null, previousRate.lastReceivedAt)
+                        : previousRate;
+                    const updated = [...previous];
+                    updated[index === -1 ? updated.length : index] = {
+                        actuator_id: actuatorId,
+                        sourceNodeId,
+                        position: msgObj.position,
+                        force: msgObj.force,
+                        speed: msgObj.speed,
+                        power_rating_pct: msgObj.power_rating_pct || null,
+                        status_flags: msgObj.status_flags,
+                        rate: sampleTelemetryRate(rate, receivedAt)
+                    };
+                    return updated;
+                });
             } catch (error) {
                 console.error('Error processing actuator status:', error);
             }
         };
 
+        const timer = setInterval(() => {
+            const now = performance.now();
+            setActuatorData(previous => expireTelemetryRates(previous, now));
+        }, TELEMETRY_REFRESH_MS);
         localNode.on('uavcan.equipment.actuator.Status', handleActuatorData);
-        
+
         return () => {
             localNode.off('uavcan.equipment.actuator.Status', handleActuatorData);
+            clearInterval(timer);
         };
-    }, [enabledActuatorIds]);
+    }, [enabledActuatorIds, localNode]);
 
-    useEffect(() => {
-        // Create or retrieve the worker
-        if (!window.ActuatorPanelWorker) {
-            window.ActuatorPanelWorker = new Worker(new URL('./workers/actuator-command-worker.js', import.meta.url));
-            console.log('Created actuator command worker');
-        }
+    useLayoutEffect(() => {
+        const instance = new Worker(new URL('./workers/actuator-command-worker.js', import.meta.url));
+        worker.current = instance;
+        const releaseSafety = () => {
+            if (!safetyEnabled.current) return;
+            safetyEnabled.current = false;
+            instance.postMessage({ type: 'safety', command: 'stop' });
+            if (!isCurrentSession()) return;
+            try {
+                localNode.sendArdupilotIndicationSafetyState(0, localNode.escCommandSpec.safety.STATUS_SAFETY_ON);
+            } catch (error) {
+                console.error('Error restoring safety state:', error);
+            }
+        };
+        localNode.on('before-bus-change', releaseSafety);
+        localNode.on('before-disconnect', releaseSafety);
+        return () => {
+            localNode.off('before-bus-change', releaseSafety);
+            localNode.off('before-disconnect', releaseSafety);
+            releaseSafety();
+            instance.terminate();
+        };
+    }, [localNode]);
 
-        window.ActuatorPanelWorker.onmessage = (event) => {
-            const localNode = window.opener?.localNode;
-            if (!localNode) return;
-            if (event.data.type === 'requestActuatorCommand') {
+    useLayoutEffect(() => {
+        worker.current.onmessage = (event) => {
+            if (!isCurrentSession()) return;
+            if (event.data.type === 'requestSafetyCommand') {
+                if (!safetyEnabled.current) return;
+                try {
+                    localNode.sendArdupilotIndicationSafetyState(0, localNode.escCommandSpec.safety.STATUS_SAFETY_OFF);
+                } catch (error) {
+                    console.error('Error sending safety state:', error);
+                }
+            } else if (!isPaused && event.data.type === 'requestActuatorCommand') {
                 try {
                     const allCommands = [];
                     activeActuatorIds.forEach(id => {
@@ -249,35 +276,11 @@ const ActuatorPanel = () => {
                 }
             }
         }
-        // Clean up
-        return () => {
-        };
-    }, [activeActuatorIds, commandTypes, commandValues, sliderMins, sliderMaxs]);
+        return () => { worker.current.onmessage = null; };
+    }, [isPaused, isCurrentSession, localNode, activeActuatorIds, commandTypes, commandValues, sliderMins, sliderMaxs]);
 
     useEffect(() => {
-        if (!window.ActuatorPanelWorker) return;
-
-        if (!isPaused) {
-            console.log(`Starting Actuator commands with rate: ${broadcastRate}Hz`);
-            window.ActuatorPanelWorker.postMessage({
-                type: 'actuator',
-                command: 'start',
-                rate: broadcastRate
-            });
-        } else {
-            console.log('Pausing Actuator commands');
-            window.ActuatorPanelWorker.postMessage({
-                type: 'actuator',
-                command: 'stop'
-            });
-        }
-        
-        return () => {
-            window.ActuatorPanelWorker.postMessage({
-                type: 'actuator',
-                command: 'stop'
-            });
-        };
+        worker.current.postMessage({ type: 'actuator', command: isPaused ? 'stop' : 'start', rate: broadcastRate });
     }, [isPaused, broadcastRate]);
 
     const renderIdSelectorDialog = () => (
@@ -470,10 +473,6 @@ const ActuatorPanel = () => {
         </Dialog>
     );
 
-    const [commandTypes, setCommandTypes] = useState({});
-    const [sliderMins, setSliderMins] = useState({});
-    const [sliderMaxs, setSliderMaxs] = useState({});
-
     const handleActuatorCommandTypeChange = (id, newType) => {
         setCommandTypes(prev => {
             const updated = { ...prev, [id]: newType };
@@ -518,14 +517,13 @@ const ActuatorPanel = () => {
         setSliderMins(initialSliderMins);
         setSliderMaxs(initialSliderMaxs);
         
-        const initialActuatorData = activeIds.map(id => ({
+        setActuatorData(previous => activeIds.map(id => previous.find(actuator => actuator.actuator_id === id) ?? {
             actuator_id: id,
             position: null,
             force: null,
             speed: null,
             power_rating_pct: null,
         }));
-        setActuatorData(initialActuatorData);
     }, [enabledActuatorIds]);
 
     return (
@@ -542,7 +540,7 @@ const ActuatorPanel = () => {
             p={1}
         >
             <AppBar position="static" color="primary" sx={{ mb: 2 }}>
-                <Toolbar variant="dense" sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                <Toolbar variant="dense" sx={{ flexWrap: 'wrap', justifyContent: 'space-between', gap: 1, py: 0.5 }}>
                     <Box sx={{ display: 'flex', alignItems: 'center' }}>
                         <Box sx={{ display: 'flex', alignItems: 'center' }}>
                             <Button 
@@ -570,7 +568,19 @@ const ActuatorPanel = () => {
                             </Button>
                         </Box>
                     </Box>
-                    
+                    <FormControlLabel
+                        sx={{ m: 0, whiteSpace: 'nowrap' }}
+                        control={
+                            <Checkbox
+                                size="small"
+                                checked={sendSafety}
+                                onChange={handleSendSafetyChange}
+                                inputProps={{ 'aria-label': 'Send Safety' }}
+                            />
+                        }
+                        label="Send Safety"
+                    />
+
                     <Box sx={{ display: 'flex', alignItems: 'center' }}>
                         <Box sx={{ display: 'flex', alignItems: 'center' }}>
                             <Typography variant="body2" sx={{ mr: 1 }}>Broadcast Rate:</Typography>
@@ -594,6 +604,7 @@ const ActuatorPanel = () => {
                             <IconButton 
                                 size="small" 
                                 onClick={togglePause}
+                                aria-label={isPaused ? 'Start broadcasting at zero' : 'Stop broadcasting'}
                                 sx={{ ml: 1 }}
                                 color={isPaused ? "default" : "primary"}
                             >
@@ -643,6 +654,9 @@ const ActuatorPanel = () => {
                                 }}>
                                     <Box sx={{flexGrow: 1}}>
                                         <Typography variant="body2" color="textSecondary">ID: {actuator.actuator_id}</Typography>
+                                        <Typography variant="body2" color="textSecondary">
+                                            FPS: {(actuator.rate?.hz ?? 0).toFixed(1)}
+                                        </Typography>
                                         <Typography variant="body2" color="textSecondary">
                                             Pos: {actuator.position !== null ? actuator.position.toFixed(3) : "NC"}
                                         </Typography>

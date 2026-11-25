@@ -22,6 +22,7 @@ function preciseSleep(ms) {
 
 // Command variables
 let timerId = null;
+let safetyTimerId = null;
 let running = false;
 let rate = 10; // Default rate in Hz
 let commandCounter = 0;
@@ -34,6 +35,14 @@ let cycleStartTime = 0;
 
 self.onmessage = function(e) {
   const command = e.data.command;
+
+  if (e.data.type === 'safety') {
+    clearInterval(safetyTimerId);
+    safetyTimerId = command === 'start'
+      ? setInterval(() => self.postMessage({ type: 'requestSafetyCommand' }), 500)
+      : null;
+    return;
+  }
   
   console.log(`Worker received ${command} command`);
   
