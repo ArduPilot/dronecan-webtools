@@ -4,7 +4,6 @@ const webpack = require('webpack');
 
 module.exports = {
     devtool: 'source-map',
-    // entry: './src/index.js',
     entry: {
         main: './src/index.js',
         subscriber: './src/subscriber.js',
@@ -15,6 +14,20 @@ module.exports = {
     output: {
         filename: '[name].bundle.js',
         path: path.resolve(__dirname, 'dist')
+    },
+    optimization: {
+        splitChunks: {
+            chunks: 'all',
+            cacheGroups: {
+                default: false,
+                defaultVendors: false,
+                sharedLibraries: {
+                    test: /[\\/]node_modules[\\/]/,
+                    minChunks: 2,
+                    name: 'shared-libraries',
+                },
+            },
+        },
     },
     module: {
         rules: [
