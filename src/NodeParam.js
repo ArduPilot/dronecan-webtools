@@ -1,7 +1,7 @@
-import React, { useState } from 'react';
+import React, { useEffect, useReducer, useState } from 'react';
 import { 
     Box, Button, Table, TableBody, TableCell, TableContainer, 
-    TableHead, TableRow, Typography, Paper, Tooltip, Chip
+    TableHead, TableRow, Typography, Paper, Chip
 } from '@mui/material';
 import SyncIcon from '@mui/icons-material/Sync';
 import SaveIcon from '@mui/icons-material/Save';
@@ -10,7 +10,7 @@ import FileDownloadIcon from '@mui/icons-material/FileDownload';
 import FileUploadIcon from '@mui/icons-material/FileUpload';
 import EditIcon from '@mui/icons-material/Edit';
 import ParamEditorSelector from './ParamEditors/ParamEditorSelector';
-import AM32_Rtttl from './am32_rtttl';
+import { getParamType, getParamValue } from './ParamEditors/param_value';
 
 const OPCODE_SAVE = 0;
 const OPCODE_ERASE = 1;
@@ -18,37 +18,50 @@ const OPCODE_ERASE = 1;
 const NodeParam = ({ nodeId, nodes }) => {
     const [modalOpen, setModalOpen] = useState(false);
     const [editParamIndex, setEditParamIndex] = useState(null);
+    const [, refreshParams] = useReducer(revision => revision + 1, 0);
+    const localNode = window.localNode;
 
-    if (!nodeId) return null;
-    const node = nodes[nodeId];
-    if (!node) return null;
+    useEffect(() => {
+        if (!localNode || !nodeId) return;
+        const handleNodeParams = (sourceNodeId) => {
+            if (sourceNodeId === Number(nodeId)) refreshParams();
+        };
+        localNode.on('node-params', handleNodeParams);
+        return () => localNode.off('node-params', handleNodeParams);
+    }, [localNode, nodeId]);
+
+    if (!localNode || !nodeId || !nodes[nodeId]) return null;
+
+    const parameters = Object.entries(localNode.nodeParams[nodeId] ?? {});
+    const count = parameters.length;
+    const countLabel = `${count} ${count === 1 ? 'parameter' : 'parameters'}`;
+    const fetchStatus = localNode.paramFetchStatus?.[nodeId];
+    let fetchMessage;
+    if (fetchStatus?.phase === 'loading') {
+        fetchMessage = `Fetching parameters… ${count} received.`;
+    } else if (fetchStatus?.phase === 'retrying') {
+        fetchMessage = `Retrying parameter index ${fetchStatus.index} (attempt ${fetchStatus.attempt} of ${fetchStatus.maxAttempts}). ${count} received.`;
+    } else if (fetchStatus?.phase === 'complete') {
+        fetchMessage = count ? `Fetch complete. Received ${countLabel}.` : 'Fetch complete. No parameters reported.';
+    } else if (fetchStatus?.phase === 'failed') {
+        fetchMessage = `Fetch failed. Received ${countLabel} before the failure.`;
+        if (fetchStatus.attempt > 1) fetchMessage += ` Index ${fetchStatus.index}, ${fetchStatus.attempt} attempts.`;
+        if (fetchStatus.error) fetchMessage += ` ${fetchStatus.error}`;
+    }
 
     const handleFetchParams = () => {
-        const localNode = window.localNode;
-        let currentParamIndex = 0; 
-        const callback = (transfer) => {
-            const msg = transfer.payload;
-            if (msg && msg.fields.name.items.length > 0) {
-                if (msg && transfer.destNodeId === localNode.nodeId) {
-                    localNode.updateNodeParamsFromResponse(transfer, currentParamIndex);
-                    currentParamIndex += 1;
-                    localNode.fetchNodeParam(nodeId, currentParamIndex, '', callback); 
-                }
-            }
-        };
-
-        localNode.fetchNodeParam(nodeId, 0, '', callback); 
+        setModalOpen(false);
+        setEditParamIndex(null);
+        localNode.fetchAllNodeParams(nodeId);
     };
 
     const handleEraseParams = () => {
-        const localNode = window.localNode;
         localNode.requestUavcanProtocolParamExecuteOpcode(nodeId, OPCODE_ERASE, 0, (transfer) => {
             console.log('Erase response:', transfer);
         });
     }
 
     const handleSaveParams = () => {
-        const localNode = window.localNode;
         localNode.requestUavcanProtocolParamExecuteOpcode(nodeId, OPCODE_SAVE, 0, (transfer) => {
             console.log('Save response:', transfer);
         });
@@ -70,18 +83,7 @@ const NodeParam = ({ nodeId, nodes }) => {
         }
     };
 
-    // Function to format boolean values visually
-    const formatBooleanValue = (value) => {
-        if (value === 'True') {
-            return <Chip size="small" label="True" color="success" />;
-        } else if (value === 'False') {
-            return <Chip size="small" label="False" color="error" />;
-        }
-        return value;
-    };
-
     const handleDownloadParams = () => {
-        const localNode = window.localNode;
         const params = localNode.nodeParams[nodeId];
         
         if (!params) {
@@ -98,22 +100,10 @@ const NodeParam = ({ nodeId, nodes }) => {
                 if (!param || !param.fields) return;
                 
                 const paramName = param.fields.name.toString();
-                let paramValue;
-                
-                // Determine parameter value based on type
-                if (param.fields.value.msg.fields.integer_value !== undefined) {
-                    paramValue = param.fields.value.msg.fields.integer_value.value;
-                } else if (param.fields.value.msg.fields.real_value !== undefined) {
-                    paramValue = param.fields.value.msg.fields.real_value.value;
-                } else if (param.fields.value.msg.fields.boolean_value !== undefined) {
-                    paramValue = param.fields.value.msg.fields.boolean_value.value === 1 ? 'True' : 'False';
-                } else if (param.fields.value.msg.fields.string_value !== undefined) {
-                    // Don't quote string values in this format
-                    paramValue = param.fields.value.msg.fields.string_value.value.toString();
-                } else {
-                    paramValue = '';
-                }
-                
+                const value = getParamValue(param.fields.value, paramName);
+                const paramValue = getParamType(param.fields.value) === 'boolean'
+                    ? (value ? 'True' : 'False') : value ?? '';
+
                 // Append to content in NAME VALUE format
                 content += `${paramName} ${paramValue}\n`;
                 
@@ -142,96 +132,23 @@ const NodeParam = ({ nodeId, nodes }) => {
     };
 
     const renderNodeParamItems = () => {
-        const localNode = window.localNode;
-        if (!localNode.nodeParams[nodeId]) return null;
         return (
-            Object.keys(localNode.nodeParams[nodeId]).map((key) => {
-                let param = localNode.nodeParams[nodeId][key];
+            parameters.map(([key, param]) => {
                 if (!param) return null;
                 if (!param.fields) return null;
-                let paramName = param.fields.name.toString();
-                let paramValueDisplay;
-                let paramTypeDisplay;
-                let paramMinValue = "";
-                let paramMinValueDisplay = "";
-                if (param.fields.min_value.msg && param.fields.min_value.msg.unionField.name !== 'uavcan.protocol.param.Empty') {
-                    paramMinValue = typeof param.fields.min_value.msg.unionField.value === 'object' ? 
-                        JSON.stringify(param.fields.min_value.msg.unionField.value) : 
-                        param.fields.min_value.msg.unionField.value;
-                }
-                let paramMaxValue = "";
-                let paramMaxValueDisplay = "";
-                if (param.fields.max_value.msg && param.fields.max_value.msg.unionField.name !== 'uavcan.protocol.param.Empty') {
-                    paramMaxValue = typeof param.fields.max_value.msg.unionField.value === 'object' ? 
-                        JSON.stringify(param.fields.max_value.msg.unionField.value) : 
-                        param.fields.max_value.msg.unionField.value;
-                }
-                let paramDefaultValue = "";
-                let paramDefaultValueDisplay = "";
-                if (param.fields.default_value.msg && param.fields.default_value.msg.unionField.name !== 'uavcan.protocol.param.Empty') {
-                    paramDefaultValue = typeof param.fields.default_value.msg.unionField.value === 'object' ? 
-                        JSON.stringify(param.fields.default_value.msg.unionField.value) : 
-                        param.fields.default_value.msg.unionField.value;
-                }
-                
-                // Determine parameter type by checking which field exists
-                if (param.fields.value.msg.fields.integer_value !== undefined) {
-                    paramTypeDisplay = 'integer';
-                    paramValueDisplay = param.fields.value.msg.fields.integer_value.value;
-                    paramMinValueDisplay = paramMinValue;
-                    paramMaxValueDisplay = paramMaxValue;
-                    paramDefaultValueDisplay = paramDefaultValue;
-                } else if (param.fields.value.msg.fields.real_value !== undefined) {
-                    paramTypeDisplay = 'real';
-                    paramValueDisplay = param.fields.value.msg.fields.real_value.value;
-                    paramMinValueDisplay = paramMinValue;
-                    paramMaxValueDisplay = paramMaxValue;
-                    paramDefaultValueDisplay = paramDefaultValue;
-                } else if (param.fields.value.msg.fields.boolean_value !== undefined) {
-                    paramTypeDisplay = 'boolean';
-                    if (param.fields.value.msg.fields.boolean_value.value === 0) {
-                        paramValueDisplay = 'Disabled';
-                    } else if (param.fields.value.msg.fields.boolean_value.value === 1) {
-                        paramValueDisplay = 'Enabled';
-                    }
+                const paramName = param.fields.name.toString();
+                const paramTypeDisplay = getParamType(param.fields.value);
+                const displayValue = compound => {
+                    const value = getParamValue(compound, paramName);
+                    if (value === null) return '';
+                    if (getParamType(compound) === 'boolean') return value ? 'Enabled' : 'Disabled';
+                    return String(value);
+                };
+                const paramValueDisplay = displayValue(param.fields.value);
+                const paramMinValueDisplay = displayValue(param.fields.min_value);
+                const paramMaxValueDisplay = displayValue(param.fields.max_value);
+                const paramDefaultValueDisplay = displayValue(param.fields.default_value);
 
-                    if (paramDefaultValue === 0) {
-                        paramDefaultValueDisplay = 'Disabled';
-                    } else {
-                        paramDefaultValueDisplay = 'Enabled';
-                    }
-                    paramMinValueDisplay = "";
-                    paramMaxValueDisplay = "";
-
-                } else if (param.fields.value.msg.fields.string_value !== undefined) {
-                    paramTypeDisplay = 'string';
-                    let stringValue = param.fields.value.msg.fields.string_value.toString();
-                    
-                    // Special handling for STARTUP_TUNE parameter
-                    if (paramName === "STARTUP_TUNE") {
-                        try {
-                            // Convert binary string to Uint8Array
-                            const binaryData = new Uint8Array(stringValue.length);
-                            for (let i = 0; i < stringValue.length; i++) {
-                                binaryData[i] = stringValue.charCodeAt(i);
-                            }
-                            
-                            // Convert to RTTTL format
-                            const rtttlString = AM32_Rtttl.from_am32_startup_melody(binaryData, "Tune");
-                            paramValueDisplay = rtttlString;
-                        } catch (err) {
-                            console.error("Error converting STARTUP_TUNE to RTTTL:", err);
-                            paramValueDisplay = stringValue;
-                        }
-                    } else {
-                        paramValueDisplay = stringValue;
-                    }
-                } else {
-                    paramTypeDisplay = 'empty';
-                    paramValueDisplay = '';
-                }
-
-                
                 return (
                     <TableRow
                         key={key}
@@ -243,11 +160,9 @@ const NodeParam = ({ nodeId, nodes }) => {
                     >
                         <TableCell>{key}</TableCell>
                         <TableCell>
-                            <Tooltip title={paramName} placement="top-start">
-                                <Typography noWrap sx={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                                    {paramName}
-                                </Typography>
-                            </Tooltip>
+                            <Typography noWrap sx={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                {paramName}
+                            </Typography>
                         </TableCell>
                         <TableCell>
                             <Chip 
@@ -258,18 +173,14 @@ const NodeParam = ({ nodeId, nodes }) => {
                             />
                         </TableCell>
                         <TableCell>
-                            <Tooltip title={paramValueDisplay} placement="top">
-                                <Box sx={{ maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                                    {paramValueDisplay}
-                                </Box>
-                            </Tooltip>
+                            <Box sx={{ maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                {paramValueDisplay}
+                            </Box>
                         </TableCell>
                         <TableCell>
-                            <Tooltip title={String(paramDefaultValue)} placement="top">
-                                <Typography noWrap sx={{ maxWidth: 80, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                                    {paramDefaultValueDisplay === "" ? "-" : String(paramDefaultValueDisplay)}
-                                </Typography>
-                            </Tooltip>
+                            <Typography noWrap sx={{ maxWidth: 80, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                {paramDefaultValueDisplay === "" ? "-" : String(paramDefaultValueDisplay)}
+                            </Typography>
                         </TableCell>
                         <TableCell>
                             <Typography noWrap sx={{ maxWidth: 80, overflow: 'hidden', textOverflow: 'ellipsis' }}>
@@ -281,10 +192,8 @@ const NodeParam = ({ nodeId, nodes }) => {
                                 {paramMaxValueDisplay === "" ? "-" : String(paramMaxValueDisplay)}
                             </Typography>
                         </TableCell>
-                        <TableCell padding="none" align="center">
-                            <Tooltip title="Edit Parameter">
-                                <EditIcon fontSize="small" color="primary" />
-                            </Tooltip>
+                        <TableCell padding="none" align="center" aria-label="Edit Parameter">
+                            <EditIcon fontSize="small" color="primary" />
                         </TableCell>
                     </TableRow>
                 );
@@ -294,7 +203,7 @@ const NodeParam = ({ nodeId, nodes }) => {
 
     const renderNodeParams = () => {
         return (
-            <TableContainer sx={{ maxHeight: 'calc(100vh - 450px)', overflowY: 'auto', flexGrow: 1 }}>
+            <TableContainer sx={{ height: '5rem', flexGrow: 1, flexShrink: 0, overflow: 'auto' }}>
                 <Table stickyHeader size="small">
                     <TableHead>
                         <TableRow>
@@ -319,16 +228,15 @@ const NodeParam = ({ nodeId, nodes }) => {
     return (
         <Box
             sx={{
-                flexGrow: 1,
+                flex: '1 0 auto',
                 bgcolor: 'background.paper',
                 display: 'flex',
-                flexDirection: 'column',
-                height: '100%'
+                flexDirection: 'column'
             }}
             component={Paper}
             p={0.5}
         >
-            <Box sx={{ display: 'flex', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', mb: 1}}>
+            <Box sx={{ display: 'flex', flexWrap: 'wrap', rowGap: 0.5, justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
                 <Typography
                     sx={{ width: 80, mr: 2, ml: 0.5 }}
                     variant="caption"
@@ -350,7 +258,7 @@ const NodeParam = ({ nodeId, nodes }) => {
                         color="primary"
                         sx={{ mr: 1 }}
                         startIcon={<SaveIcon />}
-                        disabled={!localNode.nodeParams[nodeId] || Object.keys(localNode.nodeParams[nodeId]).length === 0}
+                        disabled={count === 0}
                     >
                         Store All
                     </Button>
@@ -371,7 +279,7 @@ const NodeParam = ({ nodeId, nodes }) => {
                         sx={{ mr: 1 }}
                         startIcon={<FileDownloadIcon />}
                         onClick={handleDownloadParams}
-                        disabled={!localNode.nodeParams[nodeId] || Object.keys(localNode.nodeParams[nodeId]).length === 0}
+                        disabled={count === 0}
                     >
                         Download
                     </Button>
@@ -386,6 +294,16 @@ const NodeParam = ({ nodeId, nodes }) => {
                 </Box>
             </Box>
             {renderNodeParams()}
+            {fetchMessage && (
+                <Typography
+                    variant="caption"
+                    role="status"
+                    color={fetchStatus.phase === 'failed' ? 'error.main' : 'text.secondary'}
+                    sx={{ px: 0.5, pt: 0.5, flexShrink: 0, overflowWrap: 'anywhere' }}
+                >
+                    {fetchMessage}
+                </Typography>
+            )}
             <ParamEditorSelector 
                 open={modalOpen} 
                 onClose={() => setModalOpen(false)}

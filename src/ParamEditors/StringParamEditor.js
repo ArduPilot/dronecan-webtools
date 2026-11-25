@@ -42,14 +42,7 @@ const StringParamEditor = ({ open, onClose, nodeId, paramIndex, paramName }) => 
         // Special handling for STARTUP_TUNE parameter
         if (paramName === "STARTUP_TUNE") {
             try {
-                // Get the binary string value
-                const binaryString = paramValueField.toString();
-                
-                // Convert binary string to Uint8Array
-                const binaryData = new Uint8Array(binaryString.length);
-                for (let i = 0; i < binaryString.length; i++) {
-                    binaryData[i] = binaryString.charCodeAt(i);
-                }
+                const binaryData = paramValueField.toBytes();
                 
                 // Convert to RTTTL format
                 const rtttlString = AM32_Rtttl.from_am32_startup_melody(binaryData, "Tune");
@@ -118,7 +111,10 @@ const StringParamEditor = ({ open, onClose, nodeId, paramIndex, paramName }) => 
         if (isRTTLEditor) {
             setIsValid(validateRtttl(String(newValue)));
         } else {
-            setIsValid(true);
+            const limit = paramValueField.max_size;
+            const fits = new TextEncoder().encode(newValue).length <= limit;
+            setIsValid(fits);
+            setErrorMessage(fits ? '' : `Value exceeds ${limit} UTF-8 bytes`);
         }
     };
 
@@ -341,9 +337,7 @@ const StringParamEditor = ({ open, onClose, nodeId, paramIndex, paramName }) => 
                     result = AM32_Rtttl.to_am32_startup_melody(rtttlValue);
                 }
                 
-                // Convert to binary string after we have the result
-                const binaryString = String.fromCharCode.apply(null, result.data);
-                valueToSave = binaryString;
+                valueToSave = result.data;
                 
                 // For debug purposes, show numeric values
                 console.log("Binary array values:", Array.from(result.data).slice(0, 30));
@@ -353,10 +347,6 @@ const StringParamEditor = ({ open, onClose, nodeId, paramIndex, paramName }) => 
                 setErrorMessage(`Error saving tune: ${err.message || 'Unknown error'}`);
                 setIsValid(false);
                 conversionSuccessful = false;
-                
-                // Provide an empty binary string (all zeros) as fallback
-                const emptyArray = new Uint8Array(128);
-                valueToSave = String.fromCharCode.apply(null, emptyArray);
             }
         }
 
@@ -410,14 +400,7 @@ const StringParamEditor = ({ open, onClose, nodeId, paramIndex, paramName }) => 
                                 "Current RTTTL", 
                                 (() => {
                                     try {
-                                        // Get the binary string value
-                                        const binaryString = paramValueField.toString();
-                                        
-                                        // Convert binary string to Uint8Array
-                                        const binaryData = new Uint8Array(binaryString.length);
-                                        for (let i = 0; i < binaryString.length; i++) {
-                                            binaryData[i] = binaryString.charCodeAt(i);
-                                        }
+                                        const binaryData = paramValueField.toBytes();
                                         
                                         // Convert to RTTTL format
                                         return AM32_Rtttl.from_am32_startup_melody(binaryData, "Tune");

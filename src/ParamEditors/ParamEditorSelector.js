@@ -1,4 +1,5 @@
 import React from 'react';
+import { getParamType } from './param_value';
 import NumberParamEditor from './NumericParamEditor';
 import BooleanParamEditor from './BooleanParamEditor';
 import StringParamEditor from './StringParamEditor';
@@ -12,12 +13,9 @@ const ParamEditorSelector = ({ open, onClose, nodeId, paramIndex }) => {
     const param = localNode.nodeParams[nodeId][paramIndex];
     const paramName = param.fields.name.toString();
     
-    // Determine parameter type
-    const isBoolean = param.fields.value.msg.fields.boolean_value !== undefined;
-    const isString = param.fields.value.msg.fields.string_value !== undefined;
-    const isNumeric = !isBoolean && !isString;
-    
-    if (isBoolean) {
+    const type = getParamType(param.fields.value);
+    if (type === 'empty') return null;
+    if (type === 'boolean') {
         return <BooleanParamEditor 
                  open={open} 
                  onClose={onClose} 
@@ -27,7 +25,7 @@ const ParamEditorSelector = ({ open, onClose, nodeId, paramIndex }) => {
                />;
     }
     
-    if (isString) {
+    if (type === 'string') {
         return <StringParamEditor 
                  open={open} 
                  onClose={onClose} 
