@@ -1,114 +1,108 @@
-import React, { useState, useEffect } from "react";
+import React, { useEffect, useRef, useState } from 'react';
 import { ThemeProvider, Box, Select, MenuItem, IconButton, TextField, Typography } from '@mui/material';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import PauseIcon from '@mui/icons-material/Pause';
 import CleaningServicesIcon from '@mui/icons-material/CleaningServices';
 import DronecanLogo from './image/dronecan_logo.png';
 import { toYaml } from './dronecan/message_format_utils';
+import { createMonitorBuffer } from './monitor_buffer';
 
 import theme from './theme';
 import './css/subscriber.css';
 
-const SubscriberWindow = () => {
-    const [messages, setMessages] = useState([]);
-    const [messageRate, setMessageRate] = useState(0);
-    const [totalRX, setTotalRX] = useState(0);
-    const [maxMessageCount, setMaxMessageCount] = useState(5);
-    const [rxTimestamp, setRxTimestamp] = useState(0);
-    const [selectedMessageName, setSelectedMessageName] = useState("");
-    const [recordingSet, setRecordingSet] = useState([]);
-    const [displayRecordText, setDisplayRecordText] = useState("");
-    const [recording, setRecording] = useState(true);
+const DEFAULT_MESSAGE_COUNT = 5;
+const EMPTY_CAPTURE = { totalRX: 0, messageRate: 0, displayRecordText: '' };
 
-    if (window.opener === null) {
-        return "Not Allowed To Open Directly";
-    }
+const formatMessage = (transfer) => {
+    const destNodeText = transfer.destNodeId || 'All';
+    return `### Message from ${transfer.sourceNodeId} to ${destNodeText} ts_mono=${transfer.tsMonotonic.toFixed(15)}  ts_real=${transfer.tsReal.toFixed(15)} \n`
+        + toYaml(transfer.payload.toObj()) + '\n';
+};
+
+const SubscriberWindow = () => {
+    const [availableMessages, setAvailableMessages] = useState([]);
+    const [maxMessageCount, setMaxMessageCount] = useState(DEFAULT_MESSAGE_COUNT);
+    const [selectedMessageName, setSelectedMessageName] = useState('');
+    const [recording, setRecording] = useState(true);
+    const [{ totalRX, messageRate, displayRecordText }, setCapture] = useState(EMPTY_CAPTURE);
+    const capture = useRef({ selectedName: '', recording: true, totalRX: 0 });
+    const [buffer] = useState(() => createMonitorBuffer(DEFAULT_MESSAGE_COUNT, records => {
+        const first = records[0]?.transfer;
+        const last = records[records.length - 1]?.transfer;
+        const duration = last?.tsMonotonic - first?.tsMonotonic;
+        setCapture({
+            totalRX: capture.current.totalRX,
+            messageRate: duration > 0 ? (records.length - 1) / duration : 0,
+            displayRecordText: records.map(record => {
+                record.text ??= formatMessage(record.transfer);
+                return record.text;
+            }).join('')
+        });
+    }));
 
     useEffect(() => {
-        const localNode = window.opener.localNode;
+        const localNode = window.opener?.localNode;
+        if (!localNode) return;
+
+        const seenMessageNames = new Set();
         const handleMessageUpdate = (transfer) => {
-            if (transfer.payload.name === selectedMessageName && recording) {
-                setTotalRX(totalRX + 1);
+            const name = transfer.payload?.name;
+            if (!name) return;
+
+            if (!seenMessageNames.has(name)) {
+                seenMessageNames.add(name);
+                setAvailableMessages([...seenMessageNames]);
             }
 
-            if (messages.indexOf(transfer.payload.name) === -1) {
-                messages.push(transfer.payload.name);
-                setMessages(messages);
-                setRxTimestamp(Date.now());
+            const current = capture.current;
+            if (!current.selectedName) {
+                current.selectedName = name;
+                setSelectedMessageName(name);
             }
+            if (!current.recording || name !== current.selectedName) return;
 
-            if (recording && transfer.payload.name === selectedMessageName) {
-                recordingSet.push(transfer);
-                setRecordingSet(recordingSet.slice(-maxMessageCount));
-            }
-            if (transfer.payload.name === selectedMessageName) {
-                setRxTimestamp(Date.now());
-            }
-
-            let recordingSetText = ""; 
-            let rate = 0;
-            let tsDiffs = 0; 
-            let lastTransferTs;
-            recordingSet.map((transfer, index) => { 
-                if (index > 0) {
-                    tsDiffs += transfer.tsMonotonic - lastTransferTs
-                }
-                lastTransferTs = transfer.tsMonotonic;
-
-                if (index > 0 && index === recordingSet.length - 1) {
-                    rate = 1 / (tsDiffs / (recordingSet.length - 1)) 
-                    setMessageRate(rate);
-                }
-                const msg = transfer.payload;
-                const msgObj = msg.toObj();
-                let destNodeText = "All";
-                if (transfer.destNodeId && transfer.destNodeId !== 0) {
-                    destNodeText = `${transfer.destNodeId}`;
-                }
-                recordingSetText += `### Message from ${transfer.sourceNodeId} to ${destNodeText} ts_mono=${transfer.tsMonotonic.toFixed(15)}  ts_real=${transfer.tsReal.toFixed(15)} \n`;
-                recordingSetText += toYaml(msgObj);
-                recordingSetText += "\n";
-            })
-            setDisplayRecordText(recordingSetText);
+            current.totalRX++;
+            buffer.push({ transfer });
         };
-        localNode.on('message', handleMessageUpdate);
 
+        localNode.on('message', handleMessageUpdate);
         return () => {
             localNode.off('message', handleMessageUpdate);
+            buffer.clear();
         };
-    });
+    }, [buffer]);
 
     const updateMaxMessageCount = (event) => {
-        if (event.target.value < 1) {
-            setMaxMessageCount(1);
-        } else if (event.target.value > 100) {
-            setMaxMessageCount(100);
-        } else {
-            setMaxMessageCount(event.target.value);
-        }
-    };
-
-    const handleSelectChange = (event) => {
-        if (event.target.value !== selectedMessageName) {
-            handleClean();
-        }
-        setSelectedMessageName(event.target.value);
+        const count = Math.max(1, Math.min(100, Number.parseInt(event.target.value, 10) || 1));
+        setMaxMessageCount(count);
+        buffer.resize(count);
     };
 
     const handleClean = () => {
-        setRecordingSet([]);
-        setTotalRX(0);
-        setMessageRate(0);
+        buffer.clear();
+        capture.current.totalRX = 0;
+        setCapture(EMPTY_CAPTURE);
     };
 
-    useEffect(() => {
-        const availableMessages = messages;
-        if (!selectedMessageName && availableMessages.length > 0) {
-            setSelectedMessageName(availableMessages[0]);
+    const handleSelectChange = (event) => {
+        const name = event.target.value;
+        if (name !== capture.current.selectedName) {
+            handleClean();
+            capture.current.selectedName = name;
+            setSelectedMessageName(name);
         }
-    }, [rxTimestamp]);
+    };
 
-    const availableMessages = messages;
+    const toggleRecording = () => {
+        capture.current.recording = !capture.current.recording;
+        if (!capture.current.recording) buffer.flush();
+        setRecording(capture.current.recording);
+    };
+
+    if (!window.opener) {
+        return 'Not Allowed To Open Directly';
+    }
+
     return (
         <ThemeProvider theme={theme}>
             <Box sx={{ display: 'flex', flexDirection: 'column', flexGrow: 1, bgcolor: 'background.paper' }}>
@@ -137,11 +131,11 @@ const SubscriberWindow = () => {
                             value={selectedMessageName}
                             onChange={handleSelectChange}
                         >
-                            {availableMessages.map((messageName, index) => (
-                                <MenuItem key={index} value={messageName}>{messageName}</MenuItem>
+                            {availableMessages.map(messageName => (
+                                <MenuItem key={messageName} value={messageName}>{messageName}</MenuItem>
                             ))}
                         </Select>
-                        <IconButton ml={5} size="small" onClick={() => setRecording(!recording)}>
+                        <IconButton ml={5} size="small" aria-label={recording ? 'Pause subscriber' : 'Resume subscriber'} onClick={toggleRecording}>
                             {recording ? <PauseIcon /> : <PlayArrowIcon />}
                         </IconButton>
                     </Box>
@@ -155,7 +149,7 @@ const SubscriberWindow = () => {
                         </Box>
                         <Typography variant="caption" mr={1}> Max:</Typography>
                         <TextField size="small" sx={{width: 80}} type="number" min={1} max={100} value={maxMessageCount} onChange={updateMaxMessageCount} />
-                        <IconButton size="small" onClick={handleClean}>
+                        <IconButton size="small" aria-label="Clear subscriber" onClick={handleClean}>
                             <CleaningServicesIcon />
                         </IconButton>
                     </Box>

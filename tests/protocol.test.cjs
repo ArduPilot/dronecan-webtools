@@ -646,3 +646,19 @@ test('validates ESC int14 data and actuator uint8 IDs before sending commands', 
     assert(node.sendUavcanEquipmentEscRawCommand(0, Array(20).fill(8191)));
     assert(node.sendUavcanEquipmentActuatorArrayCommand(0, [{ id: 255, type: 0, value: 1 }]));
 });
+
+test('the bus monitor retains matching transmitted and received payload bytes on Classic CAN and CAN FD', () => {
+    const payload = new DSDL.uavcan_protocol_file_Read_Response();
+    payload.fields.data.fromBytes([0, 0x80, 0xff]);
+    for (const canfd of [false, true]) {
+        const sent = new Transfer({
+            sourceNodeId: 125, destNodeId: 127, payload, serviceNotMessage: true, canfd,
+        });
+        const frames = sent.toFrames();
+        const received = new Transfer();
+        received.fromFrames(frames);
+        assert.ok(Buffer.isBuffer(sent._payloadBytes));
+        assert.deepEqual(sent._payloadBytes, received._payloadBytes);
+        assert.deepEqual([...received.payload.fields.data.toBytes()], [0, 0x80, 0xff]);
+    }
+});

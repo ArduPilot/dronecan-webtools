@@ -1,50 +1,70 @@
-import React, { useState, useEffect } from 'react';
+import React, { memo, useEffect, useRef, useState } from 'react';
 import { TableContainer, Table, TableHead, TableBody, TableRow, TableCell, Paper, Box, Typography, IconButton } from '@mui/material';
 import PauseIcon from '@mui/icons-material/Pause';
 import CleaningServicesIcon from '@mui/icons-material/CleaningServices';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
+import { createMonitorBuffer } from './monitor_buffer';
 
-const NodeLogs = () => {
+const MAX_LOGS = 1000;
+const LOG_TOPIC = 'uavcan.protocol.debug.LogMessage';
+const TIME_FORMAT = new Intl.DateTimeFormat(undefined, {
+    hour: 'numeric',
+    minute: 'numeric',
+    second: 'numeric'
+});
+
+const levelColors = {
+    DEBUG: 'secondary.main',
+    INFO: '',
+    WARNING: 'warning.main',
+    ERROR: 'error.main'
+};
+
+const LogRow = memo(({ log }) => {
+    const msg = log.transfer.payload.toObj();
+    const level = msg.level.getConstant('value');
+    return (
+        <TableRow>
+            <TableCell>{log.transfer.sourceNodeId}</TableCell>
+            <TableCell>{TIME_FORMAT.format(log.timestampMs)}</TableCell>
+            <TableCell sx={{ bgcolor: levelColors[level] ?? 'primary.main' }}>{level}</TableCell>
+            <TableCell>{String.fromCharCode(...msg.source)}</TableCell>
+            <TableCell sx={{ whiteSpace: 'normal', wordBreak: 'break-word' }}>{msg.text}</TableCell>
+        </TableRow>
+    );
+});
+
+const NodeLogs = memo(() => {
     const [logs, setLogs] = useState([]);
     const [paused, setPaused] = useState(false);
+    const isPaused = useRef(false);
+    const nextId = useRef(0);
+    const [buffer] = useState(() => createMonitorBuffer(MAX_LOGS, setLogs));
 
     useEffect(() => {
         const localNode = window.localNode;
+        if (!localNode) return;
         const handleLog = (transfer) => {
-            if (paused) {
-                return;
-            }
-            // console.log(transfer);
-            const msg = transfer.payload;
-            const msgObj = msg.toObj();
-            setLogs((logs) => [...logs, {
-                id: transfer.sourceNodeId,
-                localTime: new Date().toLocaleTimeString(),
-                level: msgObj.level.getConstant('value'),
-                source: '',
-                text: msgObj.text 
-            }]);
+            if (isPaused.current) return;
+            buffer.push({ id: nextId.current++, timestampMs: Date.now(), transfer });
         };
-        localNode.on('uavcan.protocol.debug.LogMessage', handleLog);
+        localNode.on(LOG_TOPIC, handleLog);
         return () => {
-            localNode.off('uavcan.protocol.debug.LogMessage', handleLog);
+            localNode.off(LOG_TOPIC, handleLog);
+            buffer.clear();
         };
-    });
+    }, [buffer]);
 
-    const getLevelColor = (level) => {
-        switch (level) {
-            case 'DEBUG':
-                return 'secondary.main';
-            case 'INFO':
-                return '';
-            case 'WARNING':
-                return 'warning.main';
-            case 'ERROR':
-                return 'error.main';
-            default:
-                return 'primary.main';
-        }
-    }
+    const togglePause = () => {
+        isPaused.current = !isPaused.current;
+        if (isPaused.current) buffer.flush();
+        setPaused(isPaused.current);
+    };
+
+    const handleClear = () => {
+        buffer.clear();
+        setLogs([]);
+    };
 
     return (
         <Box
@@ -66,7 +86,8 @@ const NodeLogs = () => {
                             padding: 0
                         }}
                         size='small'
-                        onClick={() => setPaused(!paused)}
+                        aria-label={paused ? 'Resume logs' : 'Pause logs'}
+                        onClick={togglePause}
                     >
                         {paused ? <PlayArrowIcon sx={{ fontSize: 16 }} /> : <PauseIcon sx={{ fontSize: 16 }} />}
                     </IconButton>
@@ -78,7 +99,8 @@ const NodeLogs = () => {
                         }}
                         size='small'
                         color="warning"
-                        onClick={() => setLogs([])}
+                        aria-label="Clear logs"
+                        onClick={handleClear}
                     >
                         <CleaningServicesIcon sx={{ fontSize: 16 }} />
                     </IconButton>
@@ -98,24 +120,12 @@ const NodeLogs = () => {
                         </TableRow>
                     </TableHead>
                     <TableBody>
-                        {logs.map((log, index) => (
-                            <TableRow key={index}>
-                                <TableCell>{log.id}</TableCell>
-                                <TableCell>{log.localTime}</TableCell>
-                                <TableCell sx={{bgcolor: getLevelColor(log.level)}}>
-                                    {log.level}
-                                </TableCell>
-                                <TableCell>{log.source}</TableCell>
-                                <TableCell sx={{ whiteSpace: 'normal', wordBreak: 'break-word' }}>
-                                    {log.text}
-                                </TableCell>
-                            </TableRow>
-                        ))}
+                        {logs.map(log => <LogRow key={log.id} log={log} />)}
                     </TableBody>
                 </Table>
             </TableContainer>
         </Box>
     );
-};
+});
 
 export default NodeLogs;
