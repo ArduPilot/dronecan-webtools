@@ -58,11 +58,14 @@ npm run build
 
 The built files will be generated in the `dist` directory.
 
-### Update dronecan.js
+### Regenerate DroneCAN bindings
+
+From the WebTools root, use [dronecan_dsdljs at `6566d1c`](https://github.com/dronecan/dronecan_dsdljs/tree/6566d1cb362c1c22af4432282dcb68357156d13c) and [DSDL at `b4653c7`](https://github.com/DroneCAN/DSDL/tree/b4653c7abc3c47cb31b16efa24ea755232774756) in sibling directories.
+
 ```bash
-git clone https://github.com/dronecan/dronecan_dsdljs
-cd dronecan_dsdljs
-./dronecan_dsdljs.py ../DSDL/dronecan ../DSDL/ardupilot ../DSDL/uavcan ../DSDL/com --output ../dronecan-webtools/src/dronecan # adjust path in your case
+python3 -m pip install dronecan==1.0.27
+python3 ../dronecan_dsdljs/dronecan_dsdljs.py --output src/dronecan \
+    ../DSDL/uavcan ../DSDL/dronecan ../DSDL/ardupilot ../DSDL/com ../DSDL/cuav ../DSDL/mppt
 ```
 
 ## Application Structure

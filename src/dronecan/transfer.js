@@ -71,32 +71,48 @@ class Transfer {
         }
     }
 
-    toFrames(req, tao=true) {
-        const outFrames = [];
-        let payloadBits = this.payload.pack(tao);
+    toFrames(req = this.payload, tao = !this.canfd) {
+        return this.framesFromPayload(this.encodePayload(req, tao));
+    }
+
+    encodePayload(req = this.payload, tao = !this.canfd) {
+        const payloadBits = this.payload.pack(tao);
         let payload = this.bitsToBuffer(payloadBits);
 
         const frameMax = this.canfd ? 64 : 8;
 
-        if (this.canfd && payload.length > 7) {
-            let totalLen = payload.length + 1;
-            if (totalLen > frameMax) {
-                totalLen += 2;
+        if (this.sourceNodeId === 0) {
+            if (this.serviceNotMessage || !Number.isInteger(this.dataTypeId) ||
+                this.dataTypeId < 0 || this.dataTypeId > 3 || payload.length >= frameMax) {
+                throw new RangeError('Anonymous transfers require a single-frame broadcast with type ID 0 to 3');
             }
-            const modLen = totalLen % (frameMax - 1);
-            const roundedLength = Math.ceil(modLen / 8) * 8;
-            const padlen = roundedLength - modLen;
-            payload = Buffer.concat([payload, Buffer.alloc(padlen)]);
+            if (this.discriminator == null) {
+                // libcanard derives the 14-bit field from bits 1..14 of the payload CRC.
+                this.discriminator = (crc16FromBytes(payload) >> 1) & 0x3FFF;
+            } else if (!Number.isInteger(this.discriminator) || this.discriminator < 0 || this.discriminator > 0x3FFF) {
+                throw new RangeError('Anonymous transfer discriminator must fit 14 bits');
+            }
         }
 
-        let remainingPayload = payload;
+        if (this.canfd && payload.length > 7) {
+            // Include the CRC and final tail byte when choosing the last frame DLC.
+            const wirePayloadSize = payload.length + (payload.length >= frameMax ? 2 : 0);
+            const lastFrameSize = ((wirePayloadSize - 1) % (frameMax - 1)) + 2;
+            const padding = Frame.roundFDLength(lastFrameSize) - lastFrameSize;
+            if (padding) payload = Buffer.concat([payload, Buffer.alloc(padding)]);
+        }
 
-        if (remainingPayload.length > frameMax - 1) {
+        if (payload.length > frameMax - 1) {
             const baseCrc = crc16FromBytes(packBigInt64LE(req.getDataTypeSignature()));
             const crc = crc16FromBytes(payload, baseCrc);
-            remainingPayload = Buffer.concat([Buffer.from([crc & 0xFF, crc >> 8]), remainingPayload]);
+            return Buffer.concat([Buffer.from([crc & 0xFF, crc >> 8]), payload]);
         }
+        return payload;
+    }
 
+    framesFromPayload(remainingPayload) {
+        const outFrames = [];
+        const frameMax = this.canfd ? 64 : 8;
         let tail = 0x20;
         while (true) {
             tail = ((outFrames.length === 0 ? 0x80 : 0) | // Start of transfer
@@ -104,11 +120,10 @@ class Transfer {
                     ((tail ^ 0x20) & 0x20) | // Toggle bit
                     (this.transferId & 0x1F));
 
-            let remainingPayloadLength = remainingPayload.length;
             let frameBuffer = remainingPayload.slice(0, frameMax - 1);
             frameBuffer = Buffer.concat([frameBuffer, Buffer.from([tail])]);
             outFrames.push(new Frame(this.messageId, frameBuffer, true, this.canfd));
-            remainingPayload = remainingPayload.slice(frameMax - 1, remainingPayloadLength);
+            remainingPayload = remainingPayload.slice(frameMax - 1);
             if (remainingPayload.length === 0) {
                 break;
             }
@@ -123,13 +138,22 @@ class Transfer {
     }
 
     fromFrames(frames) {
+        if (!frames.length || !Frame.isValidTransferFrame(frames[0])) {
+            throw new Error('A transfer requires at least one valid CAN frame');
+        }
+        this.canfd = Boolean(frames[0].canfd);
         this.tsMonotonic = frames[0].tsMonotonic;
         this.tsReal = frames[0].tsReal;
 
         let expectedToggle = 0;
         const expectedTransferId = frames[0].data[frames[0].data.length - 1] & 0x1F;
         for (let idx = 0; idx < frames.length; idx++) {
-            const tail = frames[idx].data[frames[idx].data.length - 1];
+            const frame = frames[idx];
+            if (!Frame.isValidTransferFrame(frame) || frame.id !== frames[0].id ||
+                Boolean(frame.canfd) !== this.canfd) {
+                throw new Error('Inconsistent or invalid CAN frame in transfer');
+            }
+            const tail = frame.data[frame.data.length - 1];
             if ((tail & 0x1F) !== expectedTransferId) {
                 throw new Error(`Transfer ID ${tail & 0x1F} incorrect, expected ${expectedTransferId}`);
             } else if (idx === 0 && !(tail & 0x80)) {
@@ -165,6 +189,10 @@ class Transfer {
             payloadClass = DSDL.messages[this.dataTypeId];
         }
 
+        if (!payloadClass) {
+            throw new Error(`Unknown data type ID: ${this.dataTypeId}`);
+        }
+
         if (frames.length > 1) {
             const transferCrc = payloadBytes[0] + (payloadBytes[1] << 8);
             payloadBytes = payloadBytes.slice(2, payloadBytes.length);
@@ -174,13 +202,7 @@ class Transfer {
                 throw new Error(`CRC mismatch: expected ${crc}, got ${transferCrc}`);
             }
         }
-        let tao = !this.canfd;
-
-        if (!payloadClass) {
-            throw new Error(`Unknown data type ID: ${this.dataTypeId}`);
-        }
-
-        this.payload = payloadClass.unpack(payloadBytes, tao);
+        this.payload = payloadClass.unpack(payloadBytes, !this.canfd);
         this._payloadBytes = payloadBytes;
     }
 

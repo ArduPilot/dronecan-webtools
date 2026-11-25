@@ -127,12 +127,9 @@ export function toJson(msgObj, indent = 2) {
             ? msgObj.toObj() 
             : msgObj;
         
-        // Filter out functions since they can't be serialized
-        const filtered = JSON.parse(JSON.stringify(objToConvert, (key, value) => {
-            return typeof value === 'function' ? undefined : value;
-        }));
-        
-        return JSON.stringify(filtered, null, indent);
+        return JSON.stringify(objToConvert, (key, value) => {
+            return typeof value === 'bigint' ? value.toString() : value;
+        }, indent);
     } catch (e) {
         console.error('Error converting message to JSON:', e);
         return `{"error": "Failed to convert to JSON: ${e.message}"}`;

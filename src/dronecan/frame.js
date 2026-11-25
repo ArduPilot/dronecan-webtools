@@ -2,8 +2,31 @@
     Author: Huibean Luo <huibean.luo@vimdrones.com>
 ***/
 
+// Above eight bytes, CAN FD encodes only these payload lengths in the DLC.
+const FD_LENGTHS = [12, 16, 20, 24, 32, 48, 64];
+
 class Frame {
-    constructor(can_id, data, extended, canfd) {
+    static roundFDLength(length) {
+        if (!Number.isInteger(length) || length < 0 || length > 64) {
+            throw new RangeError('CAN FD frame length must be between 0 and 64');
+        }
+        return length <= 8 ? length : FD_LENGTHS.find(size => size >= length);
+    }
+
+    static isValidTransferFrame(frame) {
+        if (!frame || frame.extended === false || !Number.isInteger(frame.id) ||
+            frame.id < 0 || frame.id > 0x1FFFFFFF) return false;
+        const size = frame.data?.length;
+        if (!Number.isInteger(size) || size < 1 ||
+            (size > 8 && !(frame.canfd && FD_LENGTHS.includes(size)))) return false;
+        // Anonymous sources can publish only single-frame messages, never services.
+        if ((frame.id & 0x7F) === 0) {
+            return !(frame.id & 0x80) && (frame.data[size - 1] & 0xC0) === 0xC0;
+        }
+        return true;
+    }
+
+    constructor(can_id, data, extended = true, canfd = false) {
         this.id = can_id;
         this.data = data instanceof Array ? new Uint8Array(data) : data;
         this.extended = extended;
@@ -27,7 +50,8 @@ class Frame {
     }
 
     get dataTypeId() {
-        return (this.id >> 8) & 0xFFFF;
+        if (this.isService()) return this.serviceTypeId;
+        return (this.id >> 8) & (this.sourceNodeId === 0 ? 0x3 : 0xFFFF);
     }
 
     get sourceNodeId() {
@@ -35,7 +59,7 @@ class Frame {
     };
 
     get destNodeId() {
-        return (this.id >> 8) & 0x7F;
+        return this.isService() ? (this.id >> 8) & 0x7F : null;
     }
 
     get priority() {
