@@ -10,13 +10,14 @@ const CompoundType = require('./compound_type');
 const PrimitiveType = require('./primitive_type');
 const DSDL = require('./dsdl');
 
-function parseFrameMessage(messageId, buffer) {
+// Decode a reassembled DSDL payload. Tail array optimization applies only on Classic CAN.
+function parseFrameMessage(messageId, buffer, canfd = false) {
     const MessageClass = DSDL.messages[messageId];
     if (!MessageClass) {
          console.error(`Unknown message id: ${messageId}`);
          return null;
     }
-    return MessageClass.unpack(buffer);
+    return MessageClass.unpack(buffer, !canfd);
 }
 
 function toYaml(msg) {
