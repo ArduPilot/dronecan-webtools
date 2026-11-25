@@ -1,219 +1,247 @@
-import React, { useState } from 'react';
-import { 
-    Dialog, DialogTitle, DialogContent, DialogActions, 
-    Button, Typography, LinearProgress, Box, Alert
+import React, { useEffect, useRef, useState } from 'react';
+import {
+    Alert, Box, Button, Dialog, DialogActions, DialogContent, DialogTitle,
+    LinearProgress, Typography
 } from '@mui/material';
 import FileUploadIcon from '@mui/icons-material/FileUpload';
 import FileServer from './FileServer';
+import { uavcan_protocol_NodeStatus } from './dronecan/dsdl';
+
+const MODE = uavcan_protocol_NodeStatus.CONSTANTS.mode;
+const FILE_READ_TIMEOUT_MS = 15_000;
+const VERSION_CHECK_TIMEOUT_MS = 30_000;
+
+function stopAttempt(attemptRef) {
+    const attempt = attemptRef.current;
+    if (!attempt) return;
+    attemptRef.current = null;
+    clearTimeout(attempt.timer);
+    FileServer.stopTransfer(attempt.path);
+    attempt.node.off('uavcan.protocol.NodeStatus', attempt.onNodeStatus);
+    if (attempt.beginRequest) attempt.node.cancelRequest(attempt.beginRequest);
+    if (attempt.versionRequest) attempt.node.cancelRequest(attempt.versionRequest);
+    return attempt;
+}
 
 const FirmwareUpdateModal = ({ open, onClose, targetNodeId }) => {
-    const [firmwareFile, setFirmwareFile] = useState(null);
-    const [fileContent, setFileContent] = useState(null);
-    const [updateProgress, setUpdateProgress] = useState(0);
-    const [updateStatus, setUpdateStatus] = useState(null); // 'idle', 'updating', 'success', 'error'
-    const [statusMessage, setStatusMessage] = useState('');
+    const [selection, setSelection] = useState(null);
+    const [update, setUpdate] = useState(null);
+    const selectionGeneration = useRef(0);
+    const attemptRef = useRef(null);
 
-    const handleFileChange = (event) => {
+    useEffect(() => {
+        if (!open) return;
+        setSelection(null);
+        setUpdate(null);
+        const localNode = window.localNode;
+        const handleSessionChange = () => {
+            selectionGeneration.current++;
+            setSelection(null);
+            const attempt = stopAttempt(attemptRef);
+            if (!attempt) return;
+            setUpdate(attempt.complete
+                ? { phase: 'complete', message: `Upload complete. The connection changed before WebTools could read node ${targetNodeId}’s firmware version.` }
+                : { phase: 'error', message: 'The connection or CAN bus changed during the firmware transfer.' });
+        };
+        localNode?.on('session-change', handleSessionChange);
+        return () => {
+            selectionGeneration.current++;
+            stopAttempt(attemptRef);
+            localNode?.off('session-change', handleSessionChange);
+        };
+    }, [open, targetNodeId]);
+
+    const handleFileChange = async (event) => {
         const file = event.target.files[0];
-        if (!file) return;
-        
-        // Validate file extension is .bin or .hex
-        const fileExtension = file.name.split('.').pop().toLowerCase();
-        if (fileExtension !== 'bin' && fileExtension !== 'hex') {
-            setUpdateStatus('error');
-            setStatusMessage('Invalid file type. Please select a .bin or .hex firmware file.');
-            return;
-        }
-        
-        setFirmwareFile(file);
-        setUpdateStatus('idle');
-        setStatusMessage('');
-        
-        // Generate a unique path for this firmware file
-        const firmwarePath = FileServer.pathKey(file.name);
-        console.log(`Generated firmware path key: ${firmwarePath}`);
-        
-        // Load the file into the FileServer using the generated path
-        FileServer.loadFile(file, firmwarePath)
-            .then(fileInfo => {
-                console.log(`Firmware loaded: ${fileInfo.name}, size: ${fileInfo.size} bytes, path: ${fileInfo.path}`);
-                setFileContent(fileInfo);
-            })
-            .catch(error => {
-                console.error('Error loading firmware:', error);
-                setUpdateStatus('error');
-                setStatusMessage('Failed to load firmware file');
-            });
-    };
+        if (!file || attemptRef.current) return;
+        event.target.value = '';
+        const generation = ++selectionGeneration.current;
+        const sessionId = window.localNode?.sessionId;
+        setSelection({ name: file.name, phase: 'loading' });
+        setUpdate(null);
 
-    // Function to read data at a specific offset
-    const readDataAtOffset = (offset, length) => {
-        if (!fileContent || !fileContent.data) return null;
-        
         try {
-            const dataView = new DataView(fileContent.data);
-            if (offset + length > fileContent.size) {
-                console.error('Requested offset+length exceeds file size');
-                return null;
+            const loaded = await FileServer.loadFile(file);
+            if (generation === selectionGeneration.current) {
+                setSelection({ ...loaded, phase: 'ready', generation, sessionId, targetNodeId });
             }
-            
-            // Read bytes and return as hex string
-            let hexString = '';
-            for (let i = 0; i < length; i++) {
-                const byte = dataView.getUint8(offset + i);
-                hexString += byte.toString(16).padStart(2, '0');
-            }
-            return hexString;
         } catch (error) {
-            console.error('Error reading data at offset:', error);
-            return null;
+            if (generation === selectionGeneration.current) {
+                setSelection({ name: file.name, phase: 'error', message: error.message || 'Could not read the firmware file.' });
+            }
         }
     };
 
     const handleUpdate = () => {
-        if (!firmwareFile || !fileContent) return;
-        
-        try {
-            // Get the local node reference
-            const localNode = window.localNode;
-            
-            if (!localNode) {
-                setUpdateStatus('error');
-                setStatusMessage('Local node not available');
-                return;
+        const node = window.localNode;
+        if (attemptRef.current || selection?.phase !== 'ready' ||
+            selection.generation !== selectionGeneration.current || selection.targetNodeId !== targetNodeId) return;
+        if (!node || node.sessionId !== selection.sessionId || !window.mavlinkSession?.isConnected()) {
+            setUpdate({ phase: 'error', message: 'Connect to the target CAN bus before starting a firmware update.' });
+            return;
+        }
+
+        const attempt = {
+            node,
+            coveredBytes: 0,
+            complete: false,
+            lastUptime: node.nodeMonitors[targetNodeId]?.status?.uptime_sec,
+            sawUpdateMode: false,
+            sawReboot: false
+        };
+        attemptRef.current = attempt;
+
+        const finish = (phase, message) => {
+            if (attemptRef.current !== attempt) return;
+            stopAttempt(attemptRef);
+            setUpdate({ phase, message });
+        };
+        const fail = (message) => finish('error', message);
+        const waitForProgress = () => {
+            clearTimeout(attempt.timer);
+            attempt.timer = setTimeout(() => {
+                const seconds = FILE_READ_TIMEOUT_MS / 1000;
+                const detail = attempt.coveredBytes
+                    ? `Firmware transfer to node ${targetNodeId} stalled for ${seconds} seconds after ${attempt.coveredBytes} of ${selection.data.byteLength} bytes.`
+                    : `Firmware transfer to node ${targetNodeId} timed out after ${seconds} seconds. No firmware data was sent.`;
+                const nextStep = node.nodeMonitors[targetNodeId]?.offline
+                    ? 'The node is offline. Retry when it is back online.'
+                    : 'Check the node’s CAN connection, then retry.';
+                fail(`${detail} ${nextStep}`);
+            }, FILE_READ_TIMEOUT_MS);
+        };
+
+        attempt.onNodeStatus = (transfer) => {
+            if (attemptRef.current !== attempt || transfer.sourceNodeId !== targetNodeId ||
+                transfer.sessionId !== selection.sessionId) return;
+            const status = transfer.payload.toObj();
+            attempt.sawUpdateMode ||= status.mode === MODE.SOFTWARE_UPDATE;
+            if (attempt.complete && status.mode === MODE.OPERATIONAL &&
+                (attempt.sawUpdateMode || status.uptime_sec < attempt.lastUptime)) {
+                attempt.sawReboot = true;
             }
-            
-            // Update UI state
-            setUpdateStatus('updating');
-            setStatusMessage('Starting firmware update...');
-            setUpdateProgress(0);
-            
-            // Register a progress callback with the FileServer
-            const firmwarePath = fileContent.path;
-            FileServer.registerProgressCallback(firmwarePath, (progress, offset, total, eof) => {
-                // Update progress in state (0-100%)
-                setUpdateProgress(progress * 100);
-                
-                // Update status message
-                setStatusMessage(`Updating firmware: ${Math.round(progress * 100)}% (${offset}/${total} bytes)`);
-                
-                // When complete
-                if (eof) {
-                    setUpdateStatus('success');
-                    setStatusMessage('Firmware update completed successfully!');
-                    
-                    // Clean up progress tracking
-                    setTimeout(() => {
-                        FileServer.unregisterProgressCallback(firmwarePath);
-                    }, 2000);
-                }
+            attempt.lastUptime = status.uptime_sec;
+            if (!attempt.sawReboot || status.mode !== MODE.OPERATIONAL || attempt.versionRequest) return;
+
+            const request = node.getNodeInfo(targetNodeId, (response) => {
+                if (attemptRef.current !== attempt) return;
+                attempt.versionRequest = null;
+                const version = response.payload?.toObj()?.software_version;
+                if (version?.major == null || version?.minor == null) return;
+                finish('observed', `Upload complete. Node ${targetNodeId} reports firmware version ${version.major}.${version.minor}.`);
+            }, () => {
+                attempt.versionRequest = null;
             });
-            
-            // Begin the firmware update process
-            console.log(`Starting firmware update for node ${targetNodeId} with file ${firmwareFile.name}`);
-            
-            // Call the beginFirmwareUpdate method on the local node
-            localNode.beginFirmwareUpdate(
-                targetNodeId, 
-                firmwarePath,
-                (transfer) => {
-                    console.log("Firmware update result:", transfer);
-                    const msg = transfer.payload;
-                    
-                    if (!msg || msg.fields.error.value > 0) {
-                        // Handle update failure
-                        setUpdateStatus('error');
-                        setStatusMessage(`Update failed: code: ${msg.fields.error.value} ${msg.fields.optional_error_message.toString() || 'Unknown error'}`);
-                        FileServer.unregisterProgressCallback(firmwarePath);
-                    } else {
-                        setUpdateStatus('updating');
-                    }
+            if (attemptRef.current === attempt) attempt.versionRequest = request;
+            else if (request) node.cancelRequest(request);
+        };
+
+        try {
+            attempt.path = FileServer.startTransfer(selection, node, targetNodeId, ({ coveredBytes, totalBytes, complete }) => {
+                if (attemptRef.current !== attempt || attempt.complete) return;
+                if (complete) {
+                    attempt.complete = true;
+                    clearTimeout(attempt.timer);
+                    attempt.timer = setTimeout(() => finish('complete',
+                        `Upload complete. Firmware version unavailable after ${VERSION_CHECK_TIMEOUT_MS / 1000} seconds. Check Node Properties for node ${targetNodeId}.`),
+                    VERSION_CHECK_TIMEOUT_MS);
+                    setUpdate({ phase: 'verifying', message: `Upload complete (100%). Waiting for node ${targetNodeId} to report its firmware version.` });
+                    return;
                 }
-            );
-            
+                if (coveredBytes > attempt.coveredBytes) waitForProgress();
+                attempt.coveredBytes = coveredBytes;
+                setUpdate({ phase: 'sending', coveredBytes, totalBytes });
+            });
+            node.on('uavcan.protocol.NodeStatus', attempt.onNodeStatus);
+            setUpdate({ phase: 'starting', message: 'Requesting firmware update…' });
+            waitForProgress();
+
+            const request = node.beginFirmwareUpdate(targetNodeId, attempt.path, (transfer) => {
+                if (attemptRef.current !== attempt) return;
+                attempt.beginRequest = null;
+                const fields = transfer.payload?.fields;
+                const error = fields?.error?.value;
+                if (error !== 0) {
+                    const detail = fields?.optional_error_message?.toString();
+                    fail(error == null ? 'Invalid firmware update response.' :
+                        `The target rejected the firmware update (${error}).${detail ? ' ' + detail : ''}`);
+                } else if (attempt.coveredBytes === 0 && !attempt.complete) {
+                    setUpdate({ phase: 'starting', message: 'The target accepted the request. Waiting for its first file read…' });
+                }
+            }, (error) => {
+                if (attemptRef.current !== attempt) return;
+                attempt.beginRequest = null;
+                // A bootloader can start reading even if the BeginFirmwareUpdate reply was lost.
+                // The file-read timer already bounds the wait for the first request.
+                if (error.code === 'REQUEST_TIMEOUT') return;
+                fail(error.message || 'Could not start the firmware update.');
+            });
+            if (attemptRef.current === attempt) attempt.beginRequest = request;
+            else if (request) node.cancelRequest(request);
         } catch (error) {
-            console.error('Error initiating firmware update:', error);
-            setUpdateStatus('error');
-            setStatusMessage(`Failed to start update: ${error.message || 'Unknown error'}`);
+            fail(error.message || 'Could not start the firmware update.');
         }
     };
 
+    const uploading = update?.phase === 'starting' || update?.phase === 'sending';
+    const verifying = update?.phase === 'verifying';
+    const uploadFinished = verifying || update?.phase === 'observed' || update?.phase === 'complete';
+    const percentage = update?.totalBytes ? (update.coveredBytes / update.totalBytes) * 100 : 0;
+
+    const handleClose = () => {
+        selectionGeneration.current++;
+        stopAttempt(attemptRef);
+        onClose();
+    };
+
     return (
-        <Dialog open={open} onClose={updateStatus === 'updating' ? null : onClose} maxWidth="sm" fullWidth>
+        <Dialog open={open} onClose={uploading ? undefined : handleClose} maxWidth="sm" fullWidth>
             <DialogTitle>Firmware Update</DialogTitle>
             <DialogContent>
-                <Typography variant="body2" gutterBottom>
-                    Please select the firmware file (.bin|.hex) to upload to node {targetNodeId}.
-                </Typography>
-                
-                <Button
-                    variant="contained"
-                    component="label"
-                    startIcon={<FileUploadIcon />}
-                    disabled={updateStatus === 'updating'}
-                >
-                    Select Firmware File
-                    <input
-                        type="file"
-                        hidden
-                        accept=".bin,.hex"
-                        onChange={handleFileChange}
-                    />
-                </Button>
-                
-                {firmwareFile && (
+                {!uploadFinished && (
+                    <>
+                        <Typography variant="body2" gutterBottom>
+                            Select a .bin or .hex firmware file for node {targetNodeId}.
+                        </Typography>
+                        <Button variant="contained" component="label" startIcon={<FileUploadIcon />} disabled={uploading}>
+                            Select Firmware File
+                            <input type="file" hidden accept=".bin,.hex" onChange={handleFileChange} disabled={uploading} />
+                        </Button>
+                    </>
+                )}
+
+                {selection && (
                     <Typography variant="body2" sx={{ mt: 2 }}>
-                        Selected File: {firmwareFile.name}
-                        {fileContent && ` (${fileContent.size} bytes)`}
+                        {selection.name}
+                        {selection.phase === 'loading' && ' (reading…)'}
+                        {selection.phase === 'ready' && ` (${selection.data.byteLength} bytes)`}
                     </Typography>
                 )}
-                
-                {updateStatus === 'updating' && (
+                {selection?.phase === 'error' && <Alert severity="error" sx={{ mt: 2 }}>{selection.message}</Alert>}
+
+                {uploading && (
                     <Box sx={{ mt: 2 }}>
                         <Typography variant="body2" gutterBottom>
-                            {statusMessage || 'Updating firmware...'}
+                            {update.message || `Uploading firmware ${percentage.toFixed(1)}% (${update.coveredBytes} / ${update.totalBytes} bytes)`}
                         </Typography>
-                        <LinearProgress 
-                            variant="determinate" 
-                            value={updateProgress} 
-                            sx={{ mt: 1, mb: 2 }} 
-                        />
+                        <LinearProgress variant={update.totalBytes ? 'determinate' : 'indeterminate'} value={percentage} />
                     </Box>
                 )}
-                
-                {updateStatus === 'error' && (
-                    <Alert severity="error" sx={{ mt: 2 }}>
-                        {statusMessage || 'An error occurred during the update.'}
-                    </Alert>
-                )}
-                
-                {updateStatus === 'success' && (
-                    <Alert severity="success" sx={{ mt: 2 }}>
-                        {statusMessage || 'Firmware update completed successfully!'}
+                {update?.message && !uploading && (
+                    <Alert severity={update.phase === 'error' ? 'error' : 'info'} sx={{ mt: 2 }}>
+                        {update.message}
                     </Alert>
                 )}
             </DialogContent>
             <DialogActions>
-                {updateStatus !== 'updating' ? (
-                    <>
-                        <Button onClick={onClose} color="secondary">
-                            Cancel
-                        </Button>
-                        <Button 
-                            onClick={handleUpdate}
-                            color="primary" 
-                            disabled={!firmwareFile || updateStatus === 'updating'}
-                        >
-                            Update
-                        </Button>
-                    </>
-                ) : (
-                    <Button 
-                        color="secondary" 
-                        disabled={updateProgress < 100}
-                        onClick={onClose}
+                <Button variant={uploadFinished ? 'contained' : 'text'} onClick={handleClose} disabled={uploading}>Close</Button>
+                {!uploadFinished && (
+                    <Button
+                        variant="contained"
+                        onClick={handleUpdate}
+                        disabled={selection?.phase !== 'ready' || uploading}
                     >
-                        {updateProgress < 100 ? 'Updating...' : 'Close'}
+                        {update?.phase === 'error' ? 'Retry Update' : 'Update'}
                     </Button>
                 )}
             </DialogActions>

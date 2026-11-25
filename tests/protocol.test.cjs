@@ -317,6 +317,35 @@ test('malformed or expired fragments do not produce a partial transfer', t => {
     for (const frame of frames) assert.equal(transfers.addFrame(frame), null);
 });
 
+test('File.Read can emit an EOF reply and every short or full chunk', t => {
+    const client = createNode(t, 127);
+    const server = createNode(t, 42);
+    let data;
+    server.node.on('uavcan.protocol.file.Read.Request', transfer => {
+        const response = server.node.responseUavcanProtocolFileRead(transfer, 0, transfer.payload.fields.path, data);
+        assert(response.isResponseTo(transfer));
+    });
+    for (const size of [0, 1, 2, 3, 255, 256]) {
+        data = Uint8Array.from({ length: size }, (_, i) => i % 256);
+        const request = new DSDL.uavcan_protocol_file_Read_Request();
+        request.fields.offset.value = 256;
+        request.fields.path.fields.path.fromString('firmware');
+        let response;
+        client.node.request({ req: request, destNodeId: 42, callback: transfer => { response = transfer; } });
+        receive(server.node, client.frames.splice(0));
+        receive(client.node, server.frames.splice(0));
+        assert.equal(response.payload.fields.error.fields.value.value, 0);
+        assert.deepEqual(response.payload.fields.data.toObj(true), [...data]);
+    }
+
+    const oversized = new DSDL.uavcan_protocol_file_Read_Request();
+    oversized.fields.offset.value = 0;
+    data = new Uint8Array(257);
+    client.node.request({ req: oversized, destNodeId: 42 });
+    assert.throws(() => receive(server.node, client.frames), /Array is full/);
+    assert.equal(server.frames.length, 0);
+});
+
 test('Fetch All clears the selected node and notifies synchronously even if the first request fails', t => {
     const { node } = createNode(t, 127);
     const oldCache = { 0: parameter('OLD_FIRST'), 1: parameter('OLD_SECOND') };
