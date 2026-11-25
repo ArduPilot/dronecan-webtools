@@ -19,6 +19,15 @@ const PARAM_READ_MAX_ATTEMPTS = 4;
 const PARAM_READ_RETRY_TIMEOUT_MS = 2000;
 const MAX_PARAM_INDEX = Number(new DSDL.uavcan_protocol_param_GetSet_Request().fields.index.value_range.max);
 
+const escField = new DSDL.uavcan_equipment_esc_RawCommand().fields.cmd;
+const ESC_COMMAND_SPEC = Object.freeze({
+    channels: escField.max_size,
+    min: Number(escField.value_type.value_range.min),
+    max: Number(escField.value_type.value_range.max),
+    arming: DSDL.uavcan_equipment_safety_ArmingStatus.CONSTANTS.status,
+    safety: DSDL.ardupilot_indication_SafetyState.CONSTANTS.status,
+});
+
 function normalizeNodeId(id, allowAnonymous = false) {
     if (allowAnonymous && id == null) return null;
     if (typeof id === 'string' && /^\d+$/.test(id)) id = Number(id);
@@ -511,6 +520,10 @@ class Node extends EventEmitter {
         msg.fields.node_id.value = nodeId;
         msg.fields.unique_id.items = Array.from(unique_id, (value) => new PrimitiveType(value, PrimitiveType.KIND_UNSIGNED_INT, 8));
         return this.request({req: msg, destNodeId: 0, requestNotResponse: false, serviceNotMessage: false, priority: priority});
+    }
+
+    get escCommandSpec() {
+        return ESC_COMMAND_SPEC;
     }
 
     sendUavcanEquipmentEscRawCommand(nodeId, cmd, priority=REQUEST_PRIORITY) {

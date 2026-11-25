@@ -25,10 +25,6 @@ let escTimerId = null;
 let escRunning = false;
 let escRate = 10; // Default rate in Hz
 
-// Safety command variables
-let safetyTimerId = null;
-let safetyRunning = false;
-
 // Arming command variables
 let armingTimerId = null;
 let armingRunning = false;
@@ -42,10 +38,6 @@ self.onmessage = function(e) {
   switch (type) {
     case 'esc':
       handleEscCommand(command, e.data);
-      break;
-      
-    case 'safety':
-      handleSafetyCommand(command);
       break;
       
     case 'arming':
@@ -80,40 +72,6 @@ function handleEscCommand(command, data) {
       if (escTimerId !== null) {
         clearTimeout(escTimerId);
         escTimerId = null;
-      }
-      break;
-  }
-}
-
-// Handle safety commands with fixed 2Hz
-function handleSafetyCommand(command) {
-  switch (command) {
-    case 'start':
-      if (safetyTimerId !== null) {
-        clearInterval(safetyTimerId);
-        safetyTimerId = null;
-      }
-      
-      console.log('Starting safety commands at 2Hz');
-      safetyRunning = true;
-      
-      // Use setInterval for fixed-rate safety commands
-      safetyTimerId = setInterval(() => {
-        if (safetyRunning) {
-          self.postMessage({
-            type: 'requestSafetyCommand',
-            timestamp: performance.now()
-          });
-        }
-      }, 500); // Fixed 2Hz rate
-      break;
-    
-    case 'stop':
-      console.log('Stopping safety commands');
-      safetyRunning = false;
-      if (safetyTimerId !== null) {
-        clearInterval(safetyTimerId);
-        safetyTimerId = null;
       }
       break;
   }

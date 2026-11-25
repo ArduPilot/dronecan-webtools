@@ -2,9 +2,10 @@ const assert = require('node:assert/strict');
 const { EventEmitter, once } = require('node:events');
 const { ReadableStream, WritableStream } = require('node:stream/web');
 const test = require('node:test');
+const React = require('react');
 const { loadModule } = require('./load-module.cjs');
 const mavlink = require('../src/mavlink');
-const { Node, TransferManager } = require('../src/dronecan');
+const { DSDL, Node, TransferManager } = require('../src/dronecan');
 
 const noOutput = { log() {}, warn() {}, error() {} };
 const serial = loadModule('src/web_serial.js', {}, { console: noOutput, ArrayBuffer, Uint8Array, Blob });
@@ -60,6 +61,53 @@ function setup() {
     const node = new Node();
     clearInterval(node.nodeStatusIntervalID);
     return { node, session: new Session(node), sockets };
+}
+
+for (const canfd of [false, true]) {
+    test(`WebSocket adapter delivers both reentrant multi-frame GetSet reads over ${canfd ? 'CAN FD' : 'Classic CAN'}`, async t => {
+        const client = setup();
+        const peer = setup();
+        for (const [side, id] of [[client, 127], [peer, 42]]) {
+            t.after(() => side.session.close());
+            side.session.initWebSocketConnection('localhost', 5555, '', id);
+            await side.session.connect();
+            side.sockets[0].open();
+        }
+        client.node.sendCanfd = canfd;
+        client.sockets[0].send = bytes => peer.sockets[0].receive(bytes);
+        peer.sockets[0].send = bytes => client.sockets[0].receive(bytes);
+
+        const names = ['A'.repeat(80), 'B'.repeat(80)];
+        const received = [];
+        const replies = [];
+        const wireIds = [];
+        peer.session.on('mav-rx', msg => {
+            assert.equal(msg._id, canfd ? dialect.MAVLINK_MSG_ID_CANFD_FRAME : dialect.MAVLINK_MSG_ID_CAN_FRAME);
+            wireIds.push(Buffer.from(msg.data, 'latin1')[msg.len - 1] & 31);
+        });
+        peer.node.on('uavcan.protocol.param.GetSet.Request', request => {
+            const name = request.payload.fields.name.toString();
+            received.push(name);
+            const response = new DSDL.uavcan_protocol_param_GetSet_Response();
+            // The bundled legacy bindings require the active union member to be initialized.
+            for (const field of ['value', 'default_value', 'min_value', 'max_value']) {
+                response.fields[field].msg.fields.empty = new DSDL.uavcan_protocol_param_Empty();
+            }
+            response.fields.name.fromString(name);
+            peer.node.response({ res: response, transfer: request });
+        });
+        const read = name => client.node.fetchNodeParam(42, 0, name, response => {
+            replies.push([name, response.payload.fields.name.toString()]);
+        });
+        client.session.once('mav-tx', () => read(names[1]));
+        read(names[0]);
+        assert.deepEqual(received, names);
+        assert.deepEqual(replies, names.map(name => [name, name]));
+        const framesPerRead = wireIds.length / 2;
+        assert.ok(framesPerRead > 1);
+        assert.deepEqual(wireIds, [...Array(framesPerRead).fill(0), ...Array(framesPerRead).fill(1)]);
+        assert.equal(client.node.callbacks.size, 0);
+    });
 }
 
 test('WebSocket close/error invalidates the node session, signing and stale receive callbacks', async () => {
@@ -286,5 +334,52 @@ test('closing from the node session-change listener prevents a stale connection-
         assert.equal(session.forwardingInterval, null);
     } finally {
         await session.close();
+    }
+});
+
+test('control panel invalidates a queued worker tick and remounts after a CAN bus change or reconnection', () => {
+    const node = new Node({ nodeId: 42 });
+    clearInterval(node.nodeStatusIntervalID);
+    let connected = true;
+    const link = Object.assign(new EventEmitter(), { isConnected: () => connected });
+    const opener = { localNode: node, mavlinkSession: link, closed: false };
+    let subscribed;
+    let unsubscribe;
+    const { default: ControlPanelSession } = loadModule('src/ControlPanelSession.js', {
+        react: {
+            ...React,
+            useSyncExternalStore(subscribe, snapshot) {
+                if (!unsubscribe) unsubscribe = subscribe(subscribed);
+                return snapshot();
+            }
+        },
+        '@mui/material': { Typography: 'div' }
+    }, { window: { opener } });
+    const panel = () => null;
+    let notifications = 0;
+    subscribed = () => { notifications++; };
+    try {
+        const previous = ControlPanelSession({ panel });
+        assert.equal(previous.type, panel);
+        assert.equal(previous.props.isCurrentSession(), true);
+        node.changeBus(1);
+        assert.equal(previous.props.isCurrentSession(), false);
+        const afterSwitch = ControlPanelSession({ panel });
+        assert.notEqual(afterSwitch.key, previous.key);
+        assert.equal(afterSwitch.props.isCurrentSession(), true);
+
+        connected = false;
+        node.resetSession('disconnected');
+        link.emit('connection-change', null);
+        assert.equal(afterSwitch.props.isCurrentSession(), false);
+        assert.notEqual(ControlPanelSession({ panel }).type, panel);
+        connected = true;
+        link.emit('connection-change', 'serial');
+        const afterReconnect = ControlPanelSession({ panel });
+        assert.notEqual(afterReconnect.key, afterSwitch.key);
+        assert.equal(afterReconnect.props.isCurrentSession(), true);
+        assert.equal(notifications, 4);
+    } finally {
+        unsubscribe();
     }
 });
