@@ -11,16 +11,21 @@ const MODE = uavcan_protocol_NodeStatus.CONSTANTS.mode;
 const FILE_READ_TIMEOUT_MS = 15_000;
 const VERSION_CHECK_TIMEOUT_MS = 30_000;
 
-function stopAttempt(attemptRef) {
-    const attempt = attemptRef.current;
-    if (!attempt) return;
-    attemptRef.current = null;
+function stopAttempt(attempt) {
+    attempt.stopped = true;
     clearTimeout(attempt.timer);
     FileServer.stopTransfer(attempt.path);
     attempt.node.off('uavcan.protocol.NodeStatus', attempt.onNodeStatus);
+    attempt.node.off('session-change', attempt.onSessionChange);
     if (attempt.beginRequest) attempt.node.cancelRequest(attempt.beginRequest);
     if (attempt.versionRequest) attempt.node.cancelRequest(attempt.versionRequest);
-    return attempt;
+}
+
+function dismissAttempt(attemptRef) {
+    const attempt = attemptRef.current;
+    attemptRef.current = null;
+    // The last File.Read response can still need retransmission after the dialog closes.
+    if (attempt && !attempt.complete) stopAttempt(attempt);
 }
 
 const FirmwareUpdateModal = ({ open, onClose, targetNodeId }) => {
@@ -37,16 +42,11 @@ const FirmwareUpdateModal = ({ open, onClose, targetNodeId }) => {
         const handleSessionChange = () => {
             selectionGeneration.current++;
             setSelection(null);
-            const attempt = stopAttempt(attemptRef);
-            if (!attempt) return;
-            setUpdate(attempt.complete
-                ? { phase: 'complete', message: `Upload complete. The connection changed before WebTools could read node ${targetNodeId}’s firmware version.` }
-                : { phase: 'error', message: 'The connection or CAN bus changed during the firmware transfer.' });
         };
         localNode?.on('session-change', handleSessionChange);
         return () => {
             selectionGeneration.current++;
-            stopAttempt(attemptRef);
+            dismissAttempt(attemptRef);
             localNode?.off('session-change', handleSessionChange);
         };
     }, [open, targetNodeId]);
@@ -92,11 +92,21 @@ const FirmwareUpdateModal = ({ open, onClose, targetNodeId }) => {
         attemptRef.current = attempt;
 
         const finish = (phase, message) => {
-            if (attemptRef.current !== attempt) return;
-            stopAttempt(attemptRef);
-            setUpdate({ phase, message });
+            if (attempt.stopped) return;
+            stopAttempt(attempt);
+            if (attemptRef.current === attempt) {
+                attemptRef.current = null;
+                setUpdate({ phase, message });
+            }
         };
         const fail = (message) => finish('error', message);
+        attempt.onSessionChange = () => {
+            if (attempt.complete) {
+                finish('complete', `Upload complete. The connection changed before WebTools could read node ${targetNodeId}’s firmware version.`);
+            } else {
+                fail('The connection or CAN bus changed during the firmware transfer.');
+            }
+        };
         const waitForProgress = () => {
             clearTimeout(attempt.timer);
             attempt.timer = setTimeout(() => {
@@ -112,7 +122,7 @@ const FirmwareUpdateModal = ({ open, onClose, targetNodeId }) => {
         };
 
         attempt.onNodeStatus = (transfer) => {
-            if (attemptRef.current !== attempt || transfer.sourceNodeId !== targetNodeId ||
+            if (attempt.stopped || transfer.sourceNodeId !== targetNodeId ||
                 transfer.sessionId !== selection.sessionId) return;
             const status = transfer.payload.toObj();
             attempt.sawUpdateMode ||= status.mode === MODE.SOFTWARE_UPDATE;
@@ -124,7 +134,7 @@ const FirmwareUpdateModal = ({ open, onClose, targetNodeId }) => {
             if (!attempt.sawReboot || status.mode !== MODE.OPERATIONAL || attempt.versionRequest) return;
 
             const request = node.getNodeInfo(targetNodeId, (response) => {
-                if (attemptRef.current !== attempt) return;
+                if (attempt.stopped) return;
                 attempt.versionRequest = null;
                 const version = response.payload?.toObj()?.software_version;
                 if (version?.major == null || version?.minor == null) return;
@@ -132,7 +142,7 @@ const FirmwareUpdateModal = ({ open, onClose, targetNodeId }) => {
             }, () => {
                 attempt.versionRequest = null;
             });
-            if (attemptRef.current === attempt) attempt.versionRequest = request;
+            if (!attempt.stopped) attempt.versionRequest = request;
             else if (request) node.cancelRequest(request);
         };
 
@@ -153,6 +163,7 @@ const FirmwareUpdateModal = ({ open, onClose, targetNodeId }) => {
                 setUpdate({ phase: 'sending', coveredBytes, totalBytes });
             });
             node.on('uavcan.protocol.NodeStatus', attempt.onNodeStatus);
+            node.on('session-change', attempt.onSessionChange);
             setUpdate({ phase: 'starting', message: 'Requesting firmware update…' });
             waitForProgress();
 
@@ -173,7 +184,7 @@ const FirmwareUpdateModal = ({ open, onClose, targetNodeId }) => {
                 attempt.beginRequest = null;
                 // A bootloader can start reading even if the BeginFirmwareUpdate reply was lost.
                 // The file-read timer already bounds the wait for the first request.
-                if (error.code === 'REQUEST_TIMEOUT') return;
+                if (['REQUEST_TIMEOUT', 'NODE_RESTARTED', 'NODE_RECONNECTED'].includes(error.code)) return;
                 fail(error.message || 'Could not start the firmware update.');
             });
             if (attemptRef.current === attempt) attempt.beginRequest = request;
@@ -190,7 +201,7 @@ const FirmwareUpdateModal = ({ open, onClose, targetNodeId }) => {
 
     const handleClose = () => {
         selectionGeneration.current++;
-        stopAttempt(attemptRef);
+        dismissAttempt(attemptRef);
         onClose();
     };
 
