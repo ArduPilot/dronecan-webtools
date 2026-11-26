@@ -103,7 +103,7 @@ test('a real File.Read transfer serves the selected bytes through the node encod
     assert.deepEqual(fields.data.items.map((item) => item.value), Array.from(new Uint8Array(data)));
 });
 
-test('modal ignores stale selections and sessions, supports retry and reports version readback', async () => {
+function createFirmwareDialog() {
     const server = new FileServer();
     const state = [];
     let stateIndex = 0;
@@ -186,22 +186,32 @@ test('modal ignores stale selections and sessions, supports retry and reports ve
         };
     }
 
+    return { server, localNode, timers, render, select, elementWith,
+        get begun() { return begun; },
+        get readback() { return readback; },
+        unmount() { cleanup?.(); }
+    };
+}
+
+test('modal ignores stale selections and sessions, supports retry and reports version readback', async () => {
+    const dialog = createFirmwareDialog();
+    const { server, localNode, timers, render, select, elementWith } = dialog;
     try {
         await select('old.bin')(1);
         const staleUpdate = elementWith(render(), 'children', 'Update');
         assert.equal(staleUpdate.props.disabled, false);
         const finishSlow = select('slow.bin');
         staleUpdate.props.onClick();
-        assert.equal(begun, undefined);
+        assert.equal(dialog.begun, undefined);
         assert.equal(elementWith(render(), 'children', 'Update').props.disabled, true);
 
         const finishLatest = select('latest.bin');
         await finishLatest(3);
         await finishSlow(2);
         elementWith(render(), 'children', 'Update').props.onClick();
-        assert.equal(begun.target, 42);
-        assert.equal(server.transfers.get(begun.remotePath).data[0], 3);
-        const oldResponse = begun.onResponse;
+        assert.equal(dialog.begun.target, 42);
+        assert.equal(server.transfers.get(dialog.begun.remotePath).data[0], 3);
+        const oldResponse = dialog.begun.onResponse;
         localNode.sessionId++;
         localNode.emit('session-change');
         assert.equal(server.transfers.size, 0);
@@ -210,15 +220,15 @@ test('modal ignores stale selections and sessions, supports retry and reports ve
 
         await select('retry.bin')(4, 300);
         elementWith(render(), 'children', 'Update').props.onClick();
-        begun.onResponse({ payload: { fields: { error: { value: 1 } } } });
+        dialog.begun.onResponse({ payload: { fields: { error: { value: 1 } } } });
         assert.equal(server.transfers.size, 0);
         assert.equal(timers.size, 0);
 
         elementWith(render(), 'children', 'Retry Update').props.onClick();
-        const timedOutPath = begun.remotePath;
+        const timedOutPath = dialog.begun.remotePath;
         const [[timerId, readTimer]] = timers;
         assert.equal(readTimer.delay, 15_000);
-        begun.onError({ code: 'REQUEST_TIMEOUT' });
+        dialog.begun.onError({ code: 'REQUEST_TIMEOUT' });
         assert.ok(server.transfers.has(timedOutPath));
         assert.ok(timers.has(timerId), 'keep the original deadline for the first file read');
         localNode.nodeMonitors[42] = { offline: true };
@@ -227,8 +237,8 @@ test('modal ignores stale selections and sessions, supports retry and reports ve
         assert.ok(elementWith(render(), 'children', 'Firmware transfer to node 42 timed out after 15 seconds. No firmware data was sent. The node is offline. Retry when it is back online.'));
         localNode.nodeMonitors[42].offline = false;
         elementWith(render(), 'children', 'Retry Update').props.onClick();
-        assert.notEqual(begun.remotePath, timedOutPath);
-        begun.onError({ code: 'REQUEST_TIMEOUT' });
+        assert.notEqual(dialog.begun.remotePath, timedOutPath);
+        dialog.begun.onError({ code: 'REQUEST_TIMEOUT' });
         const sendStatus = (mode, uptime) => localNode.emit('uavcan.protocol.NodeStatus', {
             sourceNodeId: 42, sessionId: localNode.sessionId,
             payload: { toObj: () => ({ mode, uptime_sec: uptime }) }
@@ -236,7 +246,7 @@ test('modal ignores stale selections and sessions, supports retry and reports ve
         sendStatus(3, 10);
         const readChunk = offset => server.handleReadRequest({
             sourceNodeId: 42, destNodeId: 127, sessionId: localNode.sessionId,
-            payload: { fields: { path: { msg: { fields: { path: begun.remotePath } } }, offset: { value: offset } } }
+            payload: { fields: { path: { msg: { fields: { path: dialog.begun.remotePath } } }, offset: { value: offset } } }
         }, localNode);
         readChunk(0);
         assert.ok(elementWith(render(), 'children', 'Uploading firmware 85.3% (256 / 300 bytes)'));
@@ -244,9 +254,9 @@ test('modal ignores stale selections and sessions, supports retry and reports ve
         assert.equal(elementWith(render(), 'children', 'Update'), undefined);
         assert.ok(elementWith(render(), 'children',
             'Upload complete (100%). Waiting for node 42 to report its firmware version.'));
-        assert.equal(readback, undefined);
+        assert.equal(dialog.readback, undefined);
         sendStatus(0, 1);
-        readback({ payload: { toObj: () => ({ software_version: { major: 3, minor: 2 } }) } });
+        dialog.readback({ payload: { toObj: () => ({ software_version: { major: 3, minor: 2 } }) } });
         assert.ok(elementWith(render(), 'children',
             'Upload complete. Node 42 reports firmware version 3.2.'));
         assert.equal(elementWith(render(), 'children', 'Update'), undefined);
@@ -255,6 +265,62 @@ test('modal ignores stale selections and sessions, supports retry and reports ve
         assert.equal(server.transfers.size, 0);
         assert.equal(timers.size, 0);
     } finally {
-        cleanup?.();
+        dialog.unmount();
     }
 });
+
+for (const [beginError, size, release] of [
+    ['NODE_RESTARTED', 300, 'timeout'],
+    ['NODE_RECONNECTED', 256, 'session-change'],
+    ['NODE_RESTARTED', 300, 'version']
+]) {
+    test(`firmware remains readable after ${beginError} and dialog close until ${release}`, async () => {
+        const dialog = createFirmwareDialog();
+        const { localNode, timers, server, render, select, elementWith } = dialog;
+        let response;
+        localNode.responseUavcanProtocolFileRead = (_, error, path, bytes) => {
+            response = { error, bytes: Array.from(bytes) };
+            return {};
+        };
+        await select('firmware.bin')(7, size);
+        elementWith(render(), 'children', 'Update').props.onClick();
+        const path = dialog.begun.remotePath;
+        const read = offset => server.handleReadRequest({
+            sourceNodeId: 42, destNodeId: 127, sessionId: localNode.sessionId,
+            payload: { fields: { path: { msg: { fields: { path } } }, offset: { value: offset } } }
+        }, localNode);
+        const status = (mode, uptime_sec) => localNode.emit('uavcan.protocol.NodeStatus', {
+            sourceNodeId: 42, sessionId: localNode.sessionId,
+            payload: { toObj: () => ({ mode, uptime_sec }) }
+        });
+        const [firstReadTimer] = timers.keys();
+        dialog.begun.onError({ code: beginError });
+        assert.ok(timers.has(firstReadTimer));
+        status(3, 10);
+        read(0);
+        read(256);
+        const close = elementWith(render(), 'children', 'Close');
+        assert.equal(close.props.disabled, false);
+        const [[deadline, timer]] = timers;
+        assert.equal(timer.delay, 30_000);
+        close.props.onClick();
+        dialog.unmount();
+        read(256);
+        assert.deepEqual(response, { error: 0, bytes: Array(size - 256).fill(7) });
+        assert.ok(timers.has(deadline));
+
+        if (release === 'timeout') timer.callback();
+        if (release === 'session-change') {
+            localNode.sessionId++;
+            localNode.emit('session-change');
+        }
+        if (release === 'version') {
+            status(0, 1);
+            dialog.readback({ payload: { toObj: () => ({ software_version: { major: 4, minor: 7 } }) } });
+        }
+        assert.equal(server.transfers.size, 0);
+        assert.equal(timers.size, 0);
+        assert.equal(localNode.listenerCount('uavcan.protocol.NodeStatus'), 0);
+        assert.equal(localNode.listenerCount('session-change'), 0);
+    });
+}
